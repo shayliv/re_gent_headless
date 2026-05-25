@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -17,7 +18,7 @@ import (
 const (
 	sessionsFormatText = "text"
 	sessionsFormatJSON = "json"
-	maxSessionSteps    = 1_000_000_000
+	maxSessionSteps    = math.MaxInt
 )
 
 type sessionsJSONOutput struct {
