@@ -28,6 +28,7 @@ const (
 	agentClaude   agentTarget = "claude"
 	agentCodex    agentTarget = "codex"
 	agentOpenCode agentTarget = "opencode"
+	agentPi       agentTarget = "pi"
 	agentBoth     agentTarget = "both"
 	agentAll      agentTarget = "all"
 
@@ -35,6 +36,8 @@ const (
 	claudeAssistantHook = "rgt message-hook assistant"
 	claudeToolBatchHook = "rgt tool-batch-hook"
 	codexHookCommand    = "rgt codex-hook"
+	piPackageSource     = "git:github.com/MegaGrindStone/regent-pi-extension"
+	piInstallCommand    = "pi install -l " + piPackageSource
 )
 
 func InitCmd() *cobra.Command {
@@ -134,7 +137,7 @@ func InitCmd() *cobra.Command {
 
 	cmd.Flags().BoolVar(&skipHook, "skip-hook", false, "Skip automatic hook configuration")
 	cmd.Flags().BoolVar(&skipSkills, "skip-skills", false, "Skip agent skill installation")
-	cmd.Flags().StringVar(&agent, "agent", string(agentAuto), "Agent hooks to configure: auto, claude, codex, opencode, all")
+	cmd.Flags().StringVar(&agent, "agent", string(agentAuto), "Agent hooks to configure: auto, claude, codex, opencode, pi, both, all")
 
 	return cmd
 }
@@ -160,10 +163,10 @@ func printSummary(projectRoot string, targets []agentTarget) {
 	fmt.Println()
 	fmt.Println("Next steps:")
 	fmt.Println("  - Start an agent session in this directory")
-	fmt.Println("  - Make changes with Claude Code, Codex, or OpenCode")
+	fmt.Println("  - Make changes with Claude Code, Codex, OpenCode, or Pi")
 	fmt.Println("  - Run: rgt log")
 	fmt.Println("  - Run: rgt blame <file>")
-	if hasAgent(targets, agentClaude) || hasAgent(targets, agentCodex) || hasAgent(targets, agentOpenCode) {
+	if hasAgent(targets, agentClaude) || hasAgent(targets, agentCodex) || hasAgent(targets, agentOpenCode) || hasAgent(targets, agentPi) {
 		fmt.Println("  - Agent skills: log, blame, show")
 	}
 	if hasAgent(targets, agentCodex) {
@@ -187,6 +190,8 @@ func offerHookInstall(projectRoot string, targets []agentTarget, _ *bufio.Reader
 			options = append(options, huh.NewOption("Codex         (.codex/config.toml)", agentCodex))
 		case agentOpenCode:
 			options = append(options, huh.NewOption("OpenCode      (opencode.jsonc + npm plugin)", agentOpenCode))
+		case agentPi:
+			options = append(options, huh.NewOption("Pi            (.pi/settings.json package)", agentPi))
 		}
 	}
 
@@ -232,6 +237,11 @@ func offerHookInstall(projectRoot string, targets []agentTarget, _ *bufio.Reader
 				return nil, err
 			}
 			fmt.Printf("  %s OpenCode plugin installed\n", style.Success(""))
+		case agentPi:
+			installed := installPiHook(projectRoot)
+			if installed {
+				fmt.Printf("  %s Pi extension package installed\n", style.Success(""))
+			}
 		}
 	}
 	fmt.Println()
@@ -384,6 +394,68 @@ func registerOpenCodePlugin(projectRoot string) error {
 		return fmt.Errorf("marshal OpenCode config: %w", err)
 	}
 	return os.WriteFile(configPath, output, 0o644)
+}
+
+func installPiHook(projectRoot string) bool {
+	if piPackageConfigured(projectRoot) {
+		fmt.Printf("  %s Pi extension package already configured\n", style.Success(""))
+		return false
+	}
+	if !commandExists("pi") {
+		printPiInstallWarning("Pi executable not found on PATH")
+		return false
+	}
+
+	fmt.Printf("  %s Installing regent-pi-extension...\n", style.DimText("⟳"))
+	cmd := exec.Command("pi", "install", "-l", piPackageSource)
+	cmd.Dir = projectRoot
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		printPiInstallWarning(fmt.Sprintf("Pi package install failed: %v", err))
+		return false
+	}
+	return true
+}
+
+func printPiInstallWarning(reason string) {
+	fmt.Printf("  %s %s\n", style.Warning(""), reason)
+	fmt.Printf("  %s Install the Pi extension manually with: %s\n", style.DimText("-"), piInstallCommand)
+}
+
+func piPackageConfigured(projectRoot string) bool {
+	settingsPath := filepath.Join(projectRoot, ".pi", "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
+		return false
+	}
+
+	var settings map[string]any
+	cleaned := stripJSONComments(string(data))
+	if err := json.Unmarshal([]byte(cleaned), &settings); err != nil {
+		return false
+	}
+
+	const packageName = "regent-pi-extension"
+	switch packages := settings["packages"].(type) {
+	case string:
+		return strings.Contains(packages, packageName)
+	case []any:
+		for _, entry := range packages {
+			switch typed := entry.(type) {
+			case string:
+				if strings.Contains(typed, packageName) {
+					return true
+				}
+			case map[string]any:
+				source, _ := typed["source"].(string)
+				if strings.Contains(source, packageName) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func findOpenCodeConfig(projectRoot string) string {
@@ -633,6 +705,10 @@ doneCodexCheck:
 		}
 	}
 
+	if piPackageConfigured(projectRoot) {
+		fmt.Printf("  %s Pi\n", style.Success(""))
+	}
+
 	fmt.Println()
 }
 
@@ -657,6 +733,12 @@ func printManualInstructions(targets []agentTarget) {
 	if hasAgent(targets, agentOpenCode) {
 		fmt.Println("OpenCode: copy the re_gent plugin to .opencode/plugins/regent.ts")
 		fmt.Println("  The plugin bridges tool.execute.after and session.idle to rgt opencode-hook")
+		fmt.Println()
+	}
+	if hasAgent(targets, agentPi) {
+		fmt.Println("Pi project-local package:")
+		fmt.Printf("  %s\n", piInstallCommand)
+		fmt.Println("  The package forwards Pi events to rgt pi-hook")
 		fmt.Println()
 	}
 }
@@ -708,6 +790,11 @@ func offerSkillInstall(projectRoot string, targets []agentTarget, input *bufio.R
 				return err
 			}
 			fmt.Printf("  %s OpenCode skills installed in .opencode/skills/\n", style.Success(""))
+		case agentPi:
+			if err := installSkills(filepath.Join(projectRoot, ".pi", "skills")); err != nil {
+				return err
+			}
+			fmt.Printf("  %s Pi skills installed in .pi/skills/\n", style.Success(""))
 		}
 	}
 	fmt.Println()
@@ -784,10 +871,12 @@ func resolveAgentTargets(projectRoot string, target agentTarget) ([]agentTarget,
 		return []agentTarget{agentCodex}, nil
 	case agentOpenCode:
 		return []agentTarget{agentOpenCode}, nil
+	case agentPi:
+		return []agentTarget{agentPi}, nil
 	case agentBoth:
 		return []agentTarget{agentClaude, agentCodex}, nil
 	case agentAll:
-		return []agentTarget{agentClaude, agentCodex, agentOpenCode}, nil
+		return []agentTarget{agentClaude, agentCodex, agentOpenCode, agentPi}, nil
 	case agentAuto, "":
 		var targets []agentTarget
 		if pathExists(filepath.Join(projectRoot, ".claude")) || commandExists("claude") {
@@ -799,12 +888,15 @@ func resolveAgentTargets(projectRoot string, target agentTarget) ([]agentTarget,
 		if pathExists(filepath.Join(projectRoot, ".opencode")) || commandExists("opencode") {
 			targets = append(targets, agentOpenCode)
 		}
+		if pathExists(filepath.Join(projectRoot, ".pi")) || commandExists("pi") {
+			targets = append(targets, agentPi)
+		}
 		if len(targets) == 0 {
 			targets = append(targets, agentClaude, agentCodex)
 		}
 		return targets, nil
 	default:
-		return nil, fmt.Errorf("invalid --agent %q; expected auto, claude, codex, opencode, all, or both", target)
+		return nil, fmt.Errorf("invalid --agent %q; expected auto, claude, codex, opencode, pi, both, or all", target)
 	}
 }
 

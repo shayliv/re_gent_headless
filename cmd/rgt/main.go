@@ -27,6 +27,7 @@ func main() {
 	rootCmd.AddCommand(ToolBatchHookCmd())
 	rootCmd.AddCommand(CodexHookCmd())
 	rootCmd.AddCommand(OpenCodeHookCmd())
+	rootCmd.AddCommand(PiHookCmd())
 	rootCmd.AddCommand(cli.CatCmd())
 	rootCmd.AddCommand(cli.VersionCmd())
 

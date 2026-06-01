@@ -22,6 +22,7 @@ const (
 	OriginClaudeCode = "claude_code"
 	OriginCodexCLI   = "codex_cli"
 	OriginOpenCode   = "opencode"
+	OriginPi         = "pi"
 
 	maxRefUpdateAttempts = 8
 )
