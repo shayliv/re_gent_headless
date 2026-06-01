@@ -102,6 +102,56 @@ func TestRecorder_CodexTurnCreatesOneStep(t *testing.T) {
 	}
 }
 
+func TestRecorder_PiTurnCreatesOneStep(t *testing.T) {
+	root := t.TempDir()
+	if _, err := store.Init(root); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	recorder, ok, err := Open(root)
+	if err != nil {
+		t.Fatalf("open recorder: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected initialized recorder")
+	}
+	defer func() { _ = recorder.Close() }()
+
+	meta := SessionMetadata{SessionID: "pi/session", Origin: OriginPi, Model: "anthropic/claude-sonnet-4-5"}
+	sessionID := canonicalSessionID(OriginPi, meta.SessionID)
+
+	if err := recorder.RecordUserPrompt(UserPrompt{SessionMetadata: meta, TurnID: "turn-1", Prompt: "write pi.txt"}); err != nil {
+		t.Fatalf("record prompt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "pi.txt"), []byte("pi\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if err := recorder.RecordToolUse(ToolUse{
+		SessionMetadata: meta,
+		TurnID:          "turn-1",
+		ToolName:        "write",
+		ToolUseID:       "tool-pi",
+		ToolInput:       json.RawMessage(`{"file_path":"pi.txt","content":"pi\n"}`),
+		ToolResponse:    json.RawMessage(`{"ok":true}`),
+	}); err != nil {
+		t.Fatalf("record tool: %v", err)
+	}
+	if err := recorder.RecordAssistantAndFinalize(AssistantResponse{SessionMetadata: meta, TurnID: "turn-1", LastAssistantMessage: "done"}); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+
+	steps, err := recorder.Index.ListSteps(sessionID, 10)
+	if err != nil {
+		t.Fatalf("list steps: %v", err)
+	}
+	if len(steps) != 1 {
+		t.Fatalf("expected 1 step, got %d", len(steps))
+	}
+	if steps[0].Origin != OriginPi || steps[0].TurnID != "turn-1" {
+		t.Fatalf("unexpected Pi step metadata: %#v", steps[0])
+	}
+}
+
 func TestRecorder_NoToolTurnIsProcessedWithoutStep(t *testing.T) {
 	root := t.TempDir()
 	if _, err := store.Init(root); err != nil {
@@ -533,6 +583,30 @@ func TestRecorder_MissingCodexTurnIDRejected(t *testing.T) {
 	}
 }
 
+func TestRecorder_MissingPiTurnIDRejected(t *testing.T) {
+	root := t.TempDir()
+	if _, err := store.Init(root); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	recorder, ok, err := Open(root)
+	if err != nil {
+		t.Fatalf("open recorder: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected initialized recorder")
+	}
+	defer func() { _ = recorder.Close() }()
+
+	err = recorder.RecordUserPrompt(UserPrompt{
+		SessionMetadata: SessionMetadata{SessionID: "pi-session", Origin: OriginPi},
+		Prompt:          "missing turn",
+	})
+	if err == nil {
+		t.Fatal("expected missing turn id to be rejected")
+	}
+}
+
 func TestCanonicalSessionID_EscapesRawIDWithoutPrefixCollision(t *testing.T) {
 	sessionID := canonicalSessionID(OriginCodexCLI, "session/with/slash")
 	if sessionID != "codex_cli:session%2Fwith%2Fslash" {
@@ -541,6 +615,10 @@ func TestCanonicalSessionID_EscapesRawIDWithoutPrefixCollision(t *testing.T) {
 	prefixedRawID := canonicalSessionID(OriginCodexCLI, "codex_cli:abc")
 	if prefixedRawID != "codex_cli:codex_cli%3Aabc" {
 		t.Fatalf("prefixed raw id should not collide with canonical id: %q", prefixedRawID)
+	}
+	piSessionID := canonicalSessionID(OriginPi, "pi/session:abc")
+	if piSessionID != "pi:pi%2Fsession%3Aabc" {
+		t.Fatalf("Pi canonical session id = %q", piSessionID)
 	}
 }
 
