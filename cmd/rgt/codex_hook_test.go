@@ -37,7 +37,7 @@ func TestRunCodexHook_CapturesTurn(t *testing.T) {
 	}
 	defer func() { _ = idx.Close() }()
 
-	sessionID := "codex_cli:" + url.PathEscape("codex-session")
+	sessionID := "codex_cli--" + url.PathEscape("codex-session")
 	steps, err := idx.ListSteps(sessionID, 10)
 	if err != nil {
 		t.Fatalf("list steps: %v", err)
@@ -132,7 +132,7 @@ func TestRunToolBatchHook_MarshalsStringResponseAsJSON(t *testing.T) {
 	}
 	defer func() { _ = idx.Close() }()
 
-	sessionID := "claude_code:" + url.PathEscape("claude-session")
+	sessionID := "claude_code--" + url.PathEscape("claude-session")
 	messages, err := idx.GetAllPendingMessages(sessionID)
 	if err != nil {
 		t.Fatalf("pending messages: %v", err)
@@ -168,7 +168,7 @@ func TestRunToolBatchHook_PreservesStructuredResponse(t *testing.T) {
 	}
 	defer func() { _ = idx.Close() }()
 
-	sessionID := "claude_code:" + url.PathEscape("claude-session")
+	sessionID := "claude_code--" + url.PathEscape("claude-session")
 	messages, err := idx.GetAllPendingMessages(sessionID)
 	if err != nil {
 		t.Fatalf("pending messages: %v", err)

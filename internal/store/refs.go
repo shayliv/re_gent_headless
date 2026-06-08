@@ -66,7 +66,7 @@ func (s *Store) UpdateRef(name string, expectedOld Hash, newHash Hash) error {
 
 	// Write new value
 	newContent := string(newHash) + "\n"
-	return atomicWriteFile(refPath, []byte(newContent))
+	return atomicWriteFile(refPath, []byte(newContent), 0o644)
 }
 
 // DeleteRef deletes a ref using CAS (compare-and-swap) with lock files.

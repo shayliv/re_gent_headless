@@ -30,7 +30,7 @@ func (s *Store) WriteBlob(content []byte) (Hash, error) {
 	}
 
 	// Write atomically: temp file + rename
-	if err := atomicWriteFile(objPath, content); err != nil {
+	if err := atomicWriteFile(objPath, content, 0o444); err != nil {
 		return "", fmt.Errorf("write blob: %w", err)
 	}
 
@@ -56,7 +56,7 @@ func (s *Store) ReadBlob(h Hash) ([]byte, error) {
 }
 
 // atomicWriteFile writes content to path atomically using temp file + rename
-func atomicWriteFile(path string, content []byte) error {
+func atomicWriteFile(path string, content []byte, writeMode fs.FileMode) error {
 	dir := filepath.Dir(path)
 	tmpFile, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
@@ -85,14 +85,16 @@ func atomicWriteFile(path string, content []byte) error {
 	}
 	tmpFile = nil // Mark as closed to prevent cleanup
 
-	// Rename is atomic on POSIX filesystems
+	// On Windows, renaming over a read-only file returns "Access is denied".
+	// Make the target writable if it exists so the rename can succeed.
+	os.Chmod(path, 0o644) // Ignore error: file may not exist
+	os.Remove(path)
+
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("rename temp file: %w", err)
 	}
 
-	// Set permissions after rename
-	if err := os.Chmod(path, 0o444); err != nil {
-		// Non-fatal: object is written, just not read-only
+	if err := os.Chmod(path, writeMode); err != nil {
 		_ = err
 	}
 
