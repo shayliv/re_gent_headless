@@ -294,6 +294,12 @@ func (r *Recorder) adoptLegacySession(session SessionMetadata) error {
 	if session.externalID == "" || session.externalID == session.SessionID {
 		return nil
 	}
+
+	// Migrate old-format canonical ref (origin:externalID) to new format (origin--externalID).
+	if err := r.adoptLegacyCanonicalRef(session); err != nil {
+		return err
+	}
+
 	if !isSafeLegacyRefName(session.externalID) {
 		return r.adoptLegacySessionIndex(session)
 	}
@@ -358,6 +364,53 @@ func (r *Recorder) adoptLegacySessionIndex(session SessionMetadata) error {
 	if changed {
 		logDebug(r.Store, fmt.Sprintf("adopted legacy session index %s -> %s", session.externalID, session.SessionID))
 	}
+	return nil
+}
+
+// adoptLegacyCanonicalRef migrates a session ref from the old ":" separator format
+// (e.g., claude_code:c8f65e87) to the new "--" separator format
+// (e.g., claude_code--c8f65e87). The old ":" format is invalid on Windows filesystems.
+func (r *Recorder) adoptLegacyCanonicalRef(session SessionMetadata) error {
+	oldCanonicalID := session.Origin + ":" + url.QueryEscape(session.externalID)
+	if oldCanonicalID == session.SessionID {
+		return nil
+	}
+
+	legacyHead, err := r.Store.ReadRef("sessions/" + oldCanonicalID)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read legacy canonical ref: %w", err)
+	}
+
+	canonicalHead, canonErr := r.Store.ReadRef("sessions/" + session.SessionID)
+	if canonErr == nil {
+		if canonicalHead == legacyHead {
+			_ = r.Store.DeleteRef("sessions/"+oldCanonicalID, legacyHead)
+			return nil
+		}
+		isAncestor, ancErr := r.stepIsAncestor(legacyHead, canonicalHead)
+		if ancErr != nil {
+			return fmt.Errorf("check legacy canonical ancestry: %w", ancErr)
+		}
+		if isAncestor {
+			_ = r.Store.DeleteRef("sessions/"+oldCanonicalID, legacyHead)
+			return nil
+		}
+		logHookError(r.Store, fmt.Sprintf("archiving divergent legacy canonical ref %s -> %s", oldCanonicalID, session.SessionID))
+		return r.archiveLegacySessionRef(oldCanonicalID, legacyHead)
+	}
+
+	if !errors.Is(canonErr, fs.ErrNotExist) {
+		return fmt.Errorf("read canonical ref: %w", canonErr)
+	}
+
+	if err := r.Store.UpdateRef("sessions/"+session.SessionID, "", legacyHead); err != nil && !errors.Is(err, store.ErrRefConflict) {
+		return fmt.Errorf("adopt legacy canonical ref: %w", err)
+	}
+	_ = r.Store.DeleteRef("sessions/"+oldCanonicalID, legacyHead)
+	logDebug(r.Store, fmt.Sprintf("adopted legacy canonical ref %s -> %s", oldCanonicalID, session.SessionID))
 	return nil
 }
 
@@ -702,7 +755,7 @@ func normalizeSession(meta SessionMetadata) (SessionMetadata, error) {
 }
 
 func canonicalSessionID(origin, externalID string) string {
-	return origin + ":" + url.QueryEscape(externalID)
+	return origin + "--" + url.QueryEscape(externalID)
 }
 
 func normalizeTurnScope(origin, turnID string) (turnScope, error) {

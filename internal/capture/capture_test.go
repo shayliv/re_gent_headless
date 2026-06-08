@@ -609,15 +609,15 @@ func TestRecorder_MissingPiTurnIDRejected(t *testing.T) {
 
 func TestCanonicalSessionID_EscapesRawIDWithoutPrefixCollision(t *testing.T) {
 	sessionID := canonicalSessionID(OriginCodexCLI, "session/with/slash")
-	if sessionID != "codex_cli:session%2Fwith%2Fslash" {
+	if sessionID != "codex_cli--session%2Fwith%2Fslash" {
 		t.Fatalf("canonical session id = %q", sessionID)
 	}
 	prefixedRawID := canonicalSessionID(OriginCodexCLI, "codex_cli:abc")
-	if prefixedRawID != "codex_cli:codex_cli%3Aabc" {
+	if prefixedRawID != "codex_cli--codex_cli%3Aabc" {
 		t.Fatalf("prefixed raw id should not collide with canonical id: %q", prefixedRawID)
 	}
 	piSessionID := canonicalSessionID(OriginPi, "pi/session:abc")
-	if piSessionID != "pi:pi%2Fsession%3Aabc" {
+	if piSessionID != "pi--pi%2Fsession%3Aabc" {
 		t.Fatalf("Pi canonical session id = %q", piSessionID)
 	}
 }

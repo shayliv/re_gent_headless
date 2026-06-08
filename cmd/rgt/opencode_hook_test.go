@@ -36,7 +36,7 @@ func TestRunOpenCodeHook_CapturesTurn(t *testing.T) {
 	}
 	defer func() { _ = idx.Close() }()
 
-	sessionID := "opencode:" + url.PathEscape("ses_abc123")
+	sessionID := "opencode--" + url.PathEscape("ses_abc123")
 	steps, err := idx.ListSteps(sessionID, 10)
 	if err != nil {
 		t.Fatalf("list steps: %v", err)
@@ -76,7 +76,7 @@ func TestRunOpenCodeHook_NoTurnID(t *testing.T) {
 	}
 	defer func() { _ = idx.Close() }()
 
-	sessionID := "opencode:" + url.PathEscape("ses_xyz")
+	sessionID := "opencode--" + url.PathEscape("ses_xyz")
 	steps, err := idx.ListSteps(sessionID, 10)
 	if err != nil {
 		t.Fatalf("list steps: %v", err)

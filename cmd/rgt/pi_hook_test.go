@@ -37,7 +37,7 @@ func TestRunPiHook_CapturesTurn(t *testing.T) {
 	}
 	defer func() { _ = idx.Close() }()
 
-	sessionID := "pi:" + url.QueryEscape(sessionRawID)
+	sessionID := "pi--" + url.QueryEscape(sessionRawID)
 	steps, err := idx.ListSteps(sessionID, 10)
 	if err != nil {
 		t.Fatalf("list steps: %v", err)
