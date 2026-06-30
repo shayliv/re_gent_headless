@@ -29,7 +29,7 @@ It should complete in a few seconds.
 
 If you want to run it containerized, run this from the repository root:
 ```bash
-docker build -t rgt-demo ./examples/bad-refactor/Dockerfile . \
+docker build -t rgt-demo -f ./examples/bad-refactor/Dockerfile . \
   && docker run -it rgt-demo
 ```
 
