@@ -3,7 +3,7 @@ COPY . /src
 WORKDIR /src
 RUN go build -o /rgt ./cmd/rgt
 
-FROM ubuntu:26.10
+FROM ubuntu:26.04
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 bash-completion \
     && rm -rf /var/lib/apt/lists/* \
