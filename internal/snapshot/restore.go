@@ -30,6 +30,13 @@ type RestoreResult struct {
 //
 // When dryRun is true no files are written or removed; the returned result still
 // describes the changes that would be made.
+//
+// Ordering: target files are written *before* extra files are deleted, so a
+// failure partway through never leaves the workspace with both missing new
+// content and already-deleted files (nothing is deleted until all writes
+// succeed). It is still not fully atomic — a mid-write failure can leave some
+// files overwritten — so callers should snapshot the current workspace first
+// (as rewind does) to keep the pre-restore state recoverable.
 func Restore(s *store.Store, root string, treeHash store.Hash, ig *ignore.Matcher, dryRun bool) (RestoreResult, error) {
 	var result RestoreResult
 
@@ -44,25 +51,15 @@ func Restore(s *store.Store, root string, treeHash store.Hash, ig *ignore.Matche
 	}
 
 	// Collect the current, non-ignored workspace files that are not in the
-	// target tree. We gather them during the walk and delete afterwards so we
-	// never mutate the directory tree while WalkDir is traversing it.
+	// target tree, before making any changes. We act on them last (after all
+	// writes) and never mutate the tree while WalkDir is traversing it.
 	toDelete, err := scanDeletable(root, targetPaths, ig)
 	if err != nil {
 		return result, err
 	}
 
-	sort.Strings(toDelete)
-	for _, rel := range toDelete {
-		result.Deleted = append(result.Deleted, rel)
-		if dryRun {
-			continue
-		}
-		abs := filepath.Join(root, filepath.FromSlash(rel))
-		if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
-			return result, fmt.Errorf("delete %s: %w", rel, err)
-		}
-	}
-
+	// 1) Write target files first (create/overwrite). A failure here has not
+	//    deleted anything yet.
 	for _, entry := range tree.Entries {
 		content, err := s.ReadBlob(entry.Blob)
 		if err != nil {
@@ -94,6 +91,19 @@ func Restore(s *store.Store, root string, treeHash store.Hash, ig *ignore.Matche
 		}
 		if err := writeWorkspaceFile(abs, content, mode); err != nil {
 			return result, fmt.Errorf("write %s: %w", entry.Path, err)
+		}
+	}
+
+	// 2) Delete files absent from the target tree, only after writes succeeded.
+	sort.Strings(toDelete)
+	for _, rel := range toDelete {
+		result.Deleted = append(result.Deleted, rel)
+		if dryRun {
+			continue
+		}
+		abs := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
+			return result, fmt.Errorf("delete %s: %w", rel, err)
 		}
 	}
 
