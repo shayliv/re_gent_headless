@@ -20,6 +20,7 @@ func main() {
 
 	// Add commands in desired help order (init first, then common commands)
 	rootCmd.AddCommand(cli.InitCmd())
+	rootCmd.AddCommand(cli.ConnectCmd())
 	rootCmd.AddCommand(cli.LogCmd())
 	rootCmd.AddCommand(cli.StatusCmd())
 	rootCmd.AddCommand(cli.BlameCmd())
