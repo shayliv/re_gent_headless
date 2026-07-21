@@ -11,6 +11,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// agentIDFromPayloadOrEnv returns agentID from the payload field if present,
+// falling back to the CLAUDE_AGENT_ID environment variable that Claude Code
+// sets for Task-spawned subagent processes.
+func agentIDFromPayloadOrEnv(payloadAgentID string) string {
+	if payloadAgentID != "" {
+		return payloadAgentID
+	}
+	return os.Getenv("CLAUDE_AGENT_ID")
+}
+
 func MessageHookCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:    "message-hook [user|assistant]",
@@ -30,6 +40,7 @@ type claudeMessagePayload struct {
 	CWD                  string `json:"cwd"`
 	Model                string `json:"model"`
 	PermissionMode       string `json:"permission_mode"`
+	AgentID              string `json:"agent_id"`
 }
 
 func runMessageHook(cmd *cobra.Command, args []string) error {
@@ -55,6 +66,7 @@ func runMessageHook(cmd *cobra.Command, args []string) error {
 			Model:          payload.Model,
 			PermissionMode: payload.PermissionMode,
 			TranscriptPath: payload.TranscriptPath,
+			AgentID:        agentIDFromPayloadOrEnv(payload.AgentID),
 		}
 
 		switch args[0] {

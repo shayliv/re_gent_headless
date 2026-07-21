@@ -34,6 +34,7 @@ type codexHookPayload struct {
 	ToolInput            json.RawMessage `json:"tool_input"`
 	ToolUseID            string          `json:"tool_use_id"`
 	ToolResponse         json.RawMessage `json:"tool_response"`
+	AgentID              string          `json:"agent_id"`
 }
 
 func runCodexHook(cmd *cobra.Command, args []string) error {
@@ -59,6 +60,7 @@ func runCodexHook(cmd *cobra.Command, args []string) error {
 			Model:          payload.Model,
 			PermissionMode: payload.PermissionMode,
 			TranscriptPath: payload.TranscriptPath,
+			AgentID:        payload.AgentID,
 		}
 
 		switch normalizeHookEventName(payload.HookEventName) {

@@ -32,6 +32,7 @@ type piHookPayload struct {
 	ToolInput            json.RawMessage `json:"tool_input"`
 	ToolUseID            string          `json:"tool_use_id"`
 	ToolResponse         json.RawMessage `json:"tool_response"`
+	AgentID              string          `json:"agent_id"`
 }
 
 func runPiHook(cmd *cobra.Command, args []string) error {
@@ -56,6 +57,7 @@ func runPiHook(cmd *cobra.Command, args []string) error {
 			Origin:         capture.OriginPi,
 			Model:          payload.Model,
 			TranscriptPath: payload.TranscriptPath,
+			AgentID:        payload.AgentID,
 		}
 
 		switch normalizeHookEventName(payload.HookEventName) {

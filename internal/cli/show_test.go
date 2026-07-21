@@ -180,6 +180,57 @@ func TestPrintStepMetadata_Basic(t *testing.T) {
 	}
 }
 
+func TestPrintStepMetadata_ShowsAgentID(t *testing.T) {
+	step := &store.Step{
+		SessionID:      "sess-sub",
+		Origin:         "codex_cli",
+		AgentID:        "agent_xyz",
+		TurnID:         "turn-sub",
+		TimestampNanos: 1,
+	}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printStepMetadata("aaaaaaaaaaaaaaaabbbbbbbbcccccccc", step)
+	w.Close()
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	os.Stdout = old
+
+	out := buf.String()
+	if !strings.Contains(out, "agent_xyz") {
+		t.Errorf("output missing agent_id value: %q", out)
+	}
+	if !strings.Contains(out, "Agent:") {
+		t.Errorf("output missing Agent: label: %q", out)
+	}
+}
+
+func TestPrintStepMetadata_NoAgentLabelWhenEmpty(t *testing.T) {
+	step := &store.Step{
+		SessionID:      "sess-parent",
+		Origin:         "codex_cli",
+		TimestampNanos: 1,
+	}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printStepMetadata("aaaaaaaaaaaaaaaabbbbbbbbcccccccc", step)
+	w.Close()
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	os.Stdout = old
+
+	out := buf.String()
+	if strings.Contains(out, "Agent:") {
+		t.Errorf("output should not have Agent: label when agent_id is empty: %q", out)
+	}
+}
+
 func TestPrintStepMetadata_Minimal(t *testing.T) {
 	step := &store.Step{
 		SessionID:      "minimal-sess",

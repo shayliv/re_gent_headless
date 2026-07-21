@@ -46,6 +46,7 @@ type SessionMetadata struct {
 	Model          string
 	PermissionMode string
 	TranscriptPath string
+	AgentID        string
 	externalID     string
 }
 
@@ -497,6 +498,7 @@ func (r *Recorder) createStepForTurn(session SessionMetadata, scope turnScope) (
 			SessionID:      sessionID,
 			Origin:         session.Origin,
 			TurnID:         scope.id,
+			AgentID:        session.AgentID,
 			TimestampNanos: time.Now().UnixNano(),
 		}
 

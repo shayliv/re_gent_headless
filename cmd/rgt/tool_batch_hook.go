@@ -32,6 +32,7 @@ type toolBatchPayload struct {
 	TranscriptPath string `json:"transcript_path"`
 	Model          string `json:"model"`
 	PermissionMode string `json:"permission_mode"`
+	AgentID        string `json:"agent_id"`
 }
 
 func runToolBatchHook(cmd *cobra.Command, args []string) error {
@@ -57,6 +58,7 @@ func runToolBatchHook(cmd *cobra.Command, args []string) error {
 			Model:          payload.Model,
 			PermissionMode: payload.PermissionMode,
 			TranscriptPath: payload.TranscriptPath,
+			AgentID:        agentIDFromPayloadOrEnv(payload.AgentID),
 		}
 
 		for _, toolCall := range payload.ToolCalls {

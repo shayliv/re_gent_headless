@@ -213,6 +213,7 @@ type jsonStep struct {
 	Parent    string            `json:"parent,omitempty"`
 	Timestamp string            `json:"timestamp"`
 	Origin    string            `json:"origin,omitempty"`
+	AgentID   string            `json:"agent_id,omitempty"`
 	TurnID    string            `json:"turn_id,omitempty"`
 	Tool      string            `json:"tool"`
 	ToolUseID string            `json:"tool_use_id"`
@@ -248,6 +249,7 @@ func (f *JSONFormatter) Format(steps []EnrichedStep, sessionID string, showConve
 			Parent:    string(step.StepInfo.ParentHash),
 			Timestamp: step.StepInfo.Timestamp.Format(time.RFC3339),
 			Origin:    step.StepInfo.Origin,
+			AgentID:   step.StepInfo.AgentID,
 			TurnID:    step.StepInfo.TurnID,
 			Tool:      step.StepInfo.ToolName,
 			ToolUseID: step.StepInfo.ToolUseID,

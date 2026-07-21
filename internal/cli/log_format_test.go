@@ -452,6 +452,45 @@ func TestJSONFormatter_Format(t *testing.T) {
 		}
 	})
 
+	t.Run("subagent_agent_id", func(t *testing.T) {
+		var buf bytes.Buffer
+		f := &JSONFormatter{}
+		steps := []EnrichedStep{
+			{
+				StepInfo: index.StepInfo{
+					Hash: "aaaabbbbccccdddd", ToolName: "Write", Timestamp: ts,
+					AgentID: "agent_abc123",
+				},
+			},
+			{
+				StepInfo: index.StepInfo{
+					Hash: "eeeeffff00001111", ToolName: "Read", Timestamp: ts,
+				},
+			},
+		}
+		if err := f.Format(steps, "sess-sub", false, false, &buf); err != nil {
+			t.Fatalf("Format() returned error: %v", err)
+		}
+		var out struct {
+			Steps []struct {
+				Hash    string `json:"hash"`
+				AgentID string `json:"agent_id"`
+			} `json:"steps"`
+		}
+		if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+			t.Fatalf("output not valid JSON: %v\n%s", err, buf.String())
+		}
+		if len(out.Steps) != 2 {
+			t.Fatalf("expected 2 steps, got %d", len(out.Steps))
+		}
+		if out.Steps[0].AgentID != "agent_abc123" {
+			t.Errorf("subagent step agent_id = %q, want agent_abc123", out.Steps[0].AgentID)
+		}
+		if out.Steps[1].AgentID != "" {
+			t.Errorf("parent step agent_id = %q, want empty", out.Steps[1].AgentID)
+		}
+	})
+
 	t.Run("empty", func(t *testing.T) {
 		var buf bytes.Buffer
 		f := &JSONFormatter{}

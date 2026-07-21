@@ -157,6 +157,7 @@ func migrateSchema(db *sql.DB) error {
 		"steps": {
 			`ALTER TABLE steps ADD COLUMN origin TEXT NOT NULL DEFAULT 'claude_code'`,
 			`ALTER TABLE steps ADD COLUMN turn_id TEXT`,
+			`ALTER TABLE steps ADD COLUMN agent_id TEXT`,
 		},
 		"messages": {
 			`ALTER TABLE messages ADD COLUMN turn_id TEXT`,
@@ -567,6 +568,7 @@ type StepInfo struct {
 	SessionID      string
 	Origin         string
 	TurnID         string
+	AgentID        string
 	Timestamp      time.Time
 	ToolName       string
 	ToolUseID      string
@@ -579,7 +581,7 @@ type StepInfo struct {
 // ListSteps returns recent steps for a session (newest first)
 func (idx *DB) ListSteps(sessionID string, limit int) ([]StepInfo, error) {
 	query := `
-		SELECT id, parent_id, session_id, origin, turn_id, ts_nanos, tool_name, tool_use_id,
+		SELECT id, parent_id, session_id, origin, turn_id, agent_id, ts_nanos, tool_name, tool_use_id,
 		       tree_hash, transcript_hash
 		FROM steps
 		WHERE session_id = ?
@@ -596,11 +598,11 @@ func (idx *DB) ListSteps(sessionID string, limit int) ([]StepInfo, error) {
 	var steps []StepInfo
 	for rows.Next() {
 		var s StepInfo
-		var parentHash, turnID sql.NullString
+		var parentHash, turnID, agentID sql.NullString
 		var transcriptHash sql.NullString
 		var tsNanos int64
 
-		err := rows.Scan(&s.Hash, &parentHash, &s.SessionID, &s.Origin, &turnID, &tsNanos, &s.ToolName, &s.ToolUseID,
+		err := rows.Scan(&s.Hash, &parentHash, &s.SessionID, &s.Origin, &turnID, &agentID, &tsNanos, &s.ToolName, &s.ToolUseID,
 			&s.TreeHash, &transcriptHash)
 		if err != nil {
 			return nil, err
@@ -614,6 +616,9 @@ func (idx *DB) ListSteps(sessionID string, limit int) ([]StepInfo, error) {
 		}
 		if turnID.Valid {
 			s.TurnID = turnID.String
+		}
+		if agentID.Valid {
+			s.AgentID = agentID.String
 		}
 		s.Timestamp = time.Unix(0, tsNanos)
 

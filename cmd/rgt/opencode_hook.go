@@ -31,6 +31,7 @@ type opencodeHookPayload struct {
 	ToolInput            json.RawMessage `json:"tool_input"`
 	ToolUseID            string          `json:"tool_use_id"`
 	ToolResponse         json.RawMessage `json:"tool_response"`
+	AgentID              string          `json:"agent_id"`
 }
 
 func runOpenCodeHook(cmd *cobra.Command, args []string) error {
@@ -54,6 +55,7 @@ func runOpenCodeHook(cmd *cobra.Command, args []string) error {
 			SessionID: payload.SessionID,
 			Origin:    capture.OriginOpenCode,
 			Model:     payload.Model,
+			AgentID:   payload.AgentID,
 		}
 
 		switch normalizeHookEventName(payload.HookEventName) {

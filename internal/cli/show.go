@@ -60,6 +60,9 @@ func printStepMetadata(stepHash store.Hash, step *store.Step) {
 	if step.Origin != "" {
 		fmt.Printf("%s %s\n", style.Label("Origin:"), step.Origin)
 	}
+	if step.AgentID != "" {
+		fmt.Printf("%s %s\n", style.Label("Agent:"), step.AgentID)
+	}
 	if step.TurnID != "" {
 		fmt.Printf("%s %s\n", style.Label("Turn:"), step.TurnID)
 	}

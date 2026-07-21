@@ -987,6 +987,113 @@ func TestExistingStepForTurnWalksSessionAncestry(t *testing.T) {
 	}
 }
 
+func TestRecorder_SubagentStepHasDistinctAgentID(t *testing.T) {
+	root := t.TempDir()
+	if _, err := store.Init(root); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	recorder, ok, err := Open(root)
+	if err != nil {
+		t.Fatalf("open recorder: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected initialized recorder")
+	}
+	defer func() { _ = recorder.Close() }()
+
+	sessionID := canonicalSessionID(OriginCodexCLI, "subagent-session")
+
+	// Parent agent turn — no agent_id.
+	parentMeta := SessionMetadata{SessionID: "subagent-session", Origin: OriginCodexCLI}
+	if err := recorder.RecordUserPrompt(UserPrompt{
+		SessionMetadata: parentMeta, TurnID: "turn-parent", Prompt: "spawn a subagent",
+	}); err != nil {
+		t.Fatalf("record parent prompt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "parent.txt"), []byte("parent\n"), 0o644); err != nil {
+		t.Fatalf("write parent file: %v", err)
+	}
+	if err := recorder.RecordToolUse(ToolUse{
+		SessionMetadata: parentMeta, TurnID: "turn-parent",
+		ToolName: "Write", ToolUseID: "tool-parent",
+		ToolInput:    json.RawMessage(`{"file_path":"parent.txt","content":"parent\n"}`),
+		ToolResponse: json.RawMessage(`{"ok":true}`),
+	}); err != nil {
+		t.Fatalf("record parent tool: %v", err)
+	}
+	if err := recorder.RecordAssistantAndFinalize(AssistantResponse{
+		SessionMetadata: parentMeta, TurnID: "turn-parent", LastAssistantMessage: "done",
+	}); err != nil {
+		t.Fatalf("finalize parent turn: %v", err)
+	}
+
+	// Subagent turn — distinct agent_id, same session.
+	subMeta := SessionMetadata{
+		SessionID: "subagent-session", Origin: OriginCodexCLI, AgentID: "agent_abc123",
+	}
+	if err := recorder.RecordUserPrompt(UserPrompt{
+		SessionMetadata: subMeta, TurnID: "turn-sub", Prompt: "subagent task",
+	}); err != nil {
+		t.Fatalf("record sub prompt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sub.txt"), []byte("sub\n"), 0o644); err != nil {
+		t.Fatalf("write sub file: %v", err)
+	}
+	if err := recorder.RecordToolUse(ToolUse{
+		SessionMetadata: subMeta, TurnID: "turn-sub",
+		ToolName: "Write", ToolUseID: "tool-sub",
+		ToolInput:    json.RawMessage(`{"file_path":"sub.txt","content":"sub\n"}`),
+		ToolResponse: json.RawMessage(`{"ok":true}`),
+	}); err != nil {
+		t.Fatalf("record sub tool: %v", err)
+	}
+	if err := recorder.RecordAssistantAndFinalize(AssistantResponse{
+		SessionMetadata: subMeta, TurnID: "turn-sub", LastAssistantMessage: "sub done",
+	}); err != nil {
+		t.Fatalf("finalize sub turn: %v", err)
+	}
+
+	steps, err := recorder.Index.ListSteps(sessionID, 10)
+	if err != nil {
+		t.Fatalf("list steps: %v", err)
+	}
+	if len(steps) != 2 {
+		t.Fatalf("expected 2 steps, got %d", len(steps))
+	}
+
+	// ListSteps returns newest-first; subagent step is newer.
+	subStep := steps[0]
+	parentStep := steps[1]
+
+	if subStep.AgentID != "agent_abc123" {
+		t.Fatalf("subagent step AgentID = %q, want %q", subStep.AgentID, "agent_abc123")
+	}
+	if parentStep.AgentID != "" {
+		t.Fatalf("parent step AgentID = %q, want empty", parentStep.AgentID)
+	}
+	// Subagent step's parent is the parent step — shared session lineage.
+	if subStep.ParentHash != parentStep.Hash {
+		t.Fatalf("subagent step parent = %s, want %s", subStep.ParentHash, parentStep.Hash)
+	}
+
+	// agent_id persists through the object store.
+	subObj, err := recorder.Store.ReadStep(subStep.Hash)
+	if err != nil {
+		t.Fatalf("read sub step obj: %v", err)
+	}
+	if subObj.AgentID != "agent_abc123" {
+		t.Fatalf("sub step obj AgentID = %q, want %q", subObj.AgentID, "agent_abc123")
+	}
+	parentObj, err := recorder.Store.ReadStep(parentStep.Hash)
+	if err != nil {
+		t.Fatalf("read parent step obj: %v", err)
+	}
+	if parentObj.AgentID != "" {
+		t.Fatalf("parent step obj AgentID = %q, want empty", parentObj.AgentID)
+	}
+}
+
 func TestComputeAndWriteBlame_ReturnsParentReadError(t *testing.T) {
 	root := t.TempDir()
 	s, err := store.Init(root)
