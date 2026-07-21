@@ -33,6 +33,11 @@ type Recorder struct {
 	Store *store.Store
 	Index *index.DB
 	CWD   string
+
+	// scannedTranscripts remembers which (session, turn, transcript) triples this
+	// process already scanned for assistant text, so a multi-tool batch costs one
+	// transcript read instead of one per tool.
+	scannedTranscripts map[string]struct{}
 }
 
 type turnScope struct {
@@ -169,6 +174,10 @@ func (r *Recorder) RecordToolUse(event ToolUse) error {
 		return err
 	}
 
+	// Capture the narration and reasoning that preceded this tool batch before
+	// the tool messages land, so the conversation keeps its chronological order.
+	r.logAssistantTranscript(r.captureAssistantTranscriptOnce(session, scope))
+
 	inputHash, err := r.Store.WriteBlob(event.ToolInput)
 	if err != nil {
 		return fmt.Errorf("store tool input: %w", err)
@@ -223,6 +232,11 @@ func (r *Recorder) RecordAssistantAndFinalize(event AssistantResponse) error {
 		return err
 	}
 
+	// Pull in the assistant text and reasoning the turn produced. This runs before
+	// the step is written so the blocks are pending and get linked to it, and
+	// before the early return below so a recovered turn is enriched too.
+	r.logAssistantTranscript(r.captureAssistantTranscript(session, scope))
+
 	if !scope.allTurns {
 		existingStep, ok, err := r.existingStepForTurn(session.SessionID, scope.id)
 		if err != nil {
@@ -242,15 +256,24 @@ func (r *Recorder) RecordAssistantAndFinalize(event AssistantResponse) error {
 	}
 
 	now := time.Now().UnixNano()
-	if err := r.Index.AppendMessage(index.Message{
-		ID:          newMessageID("assistant"),
-		SessionID:   session.SessionID,
-		TurnID:      scope.id,
-		Timestamp:   now,
-		MessageType: "assistant",
-		ContentText: event.LastAssistantMessage,
-	}); err != nil {
-		return fmt.Errorf("insert assistant message: %w", err)
+	// The host's final assistant message is usually the tail of the transcript we
+	// just scanned. Only append it when this turn has no identical pending block,
+	// otherwise the same text would be recorded twice.
+	captured, err := r.Index.PendingMessageExists(session.SessionID, scope.id, "assistant", event.LastAssistantMessage, scope.allTurns)
+	if err != nil {
+		return fmt.Errorf("look up pending assistant message: %w", err)
+	}
+	if !captured {
+		if err := r.Index.AppendMessage(index.Message{
+			ID:          newMessageID("assistant"),
+			SessionID:   session.SessionID,
+			TurnID:      scope.id,
+			Timestamp:   now,
+			MessageType: "assistant",
+			ContentText: event.LastAssistantMessage,
+		}); err != nil {
+			return fmt.Errorf("insert assistant message: %w", err)
+		}
 	}
 
 	stepHash, err := r.createStepForTurn(session, scope)

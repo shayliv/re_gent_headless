@@ -10,6 +10,141 @@ import (
 	"github.com/regent-vcs/regent/internal/store"
 )
 
+func newTestIndex(t *testing.T) *DB {
+	t.Helper()
+
+	s, err := store.Init(t.TempDir())
+	if err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	idx, err := Open(s)
+	if err != nil {
+		t.Fatalf("open index: %v", err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+
+	return idx
+}
+
+func TestAppendMessageIfNew_DedupesByIDAndAssignsSequence(t *testing.T) {
+	idx := newTestIndex(t)
+
+	const sessionID = "claude_code--sess"
+	msg := Message{
+		ID:          "msg_reasoning_fixed",
+		SessionID:   sessionID,
+		TurnID:      "turn-1",
+		Timestamp:   time.Now().UnixNano(),
+		MessageType: "reasoning",
+		ContentText: "weighing the options",
+	}
+
+	inserted, err := idx.AppendMessageIfNew(msg)
+	if err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	if !inserted {
+		t.Fatal("first append should insert")
+	}
+
+	inserted, err = idx.AppendMessageIfNew(msg)
+	if err != nil {
+		t.Fatalf("second append: %v", err)
+	}
+	if inserted {
+		t.Fatal("replaying the same id must not insert a second row")
+	}
+
+	second := msg
+	second.ID = "msg_assistant_fixed"
+	second.MessageType = "assistant"
+	second.ContentText = "here is the answer"
+	if _, err := idx.AppendMessageIfNew(second); err != nil {
+		t.Fatalf("append second message: %v", err)
+	}
+
+	pending, err := idx.GetPendingMessages(sessionID, "turn-1")
+	if err != nil {
+		t.Fatalf("get pending messages: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("got %d pending messages, want 2", len(pending))
+	}
+	if pending[0].SeqNum != 0 || pending[1].SeqNum != 1 {
+		t.Fatalf("seq nums = %d, %d; want 0, 1", pending[0].SeqNum, pending[1].SeqNum)
+	}
+	if pending[0].ContentText != "weighing the options" || pending[1].ContentText != "here is the answer" {
+		t.Fatalf("unexpected message order: %q then %q", pending[0].ContentText, pending[1].ContentText)
+	}
+}
+
+func TestAppendMessageIfNew_RequiresIDAndSession(t *testing.T) {
+	idx := newTestIndex(t)
+
+	if _, err := idx.AppendMessageIfNew(Message{SessionID: "s", MessageType: "reasoning"}); err == nil {
+		t.Error("expected an error when the message id is missing")
+	}
+	if _, err := idx.AppendMessageIfNew(Message{ID: "m", MessageType: "reasoning"}); err == nil {
+		t.Error("expected an error when the session id is missing")
+	}
+}
+
+func TestPendingMessageExists(t *testing.T) {
+	idx := newTestIndex(t)
+
+	const sessionID = "claude_code--sess"
+	if _, err := idx.AppendMessageIfNew(Message{
+		ID:          "msg_assistant_1",
+		SessionID:   sessionID,
+		TurnID:      "turn-1",
+		Timestamp:   time.Now().UnixNano(),
+		MessageType: "assistant",
+		ContentText: "all done",
+	}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		turnID      string
+		messageType string
+		content     string
+		allTurns    bool
+		want        bool
+	}{
+		{name: "same turn and text", turnID: "turn-1", messageType: "assistant", content: "all done", want: true},
+		{name: "across all turns", messageType: "assistant", content: "all done", allTurns: true, want: true},
+		{name: "different turn", turnID: "turn-2", messageType: "assistant", content: "all done"},
+		{name: "different text", turnID: "turn-1", messageType: "assistant", content: "all done!"},
+		{name: "different type", turnID: "turn-1", messageType: "reasoning", content: "all done"},
+		{name: "empty text is never a match", turnID: "turn-1", messageType: "assistant", content: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := idx.PendingMessageExists(sessionID, tt.turnID, tt.messageType, tt.content, tt.allTurns)
+			if err != nil {
+				t.Fatalf("PendingMessageExists() error = %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("PendingMessageExists() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	// Once a message is linked to a step it is no longer pending, so a later turn
+	// repeating the same text is recorded rather than swallowed.
+	if _, err := idx.LinkPendingMessagesToStep(sessionID, "turn-1", store.Hash("step-hash"), time.Now().UnixNano()); err != nil {
+		t.Fatalf("link messages: %v", err)
+	}
+	exists, err := idx.PendingMessageExists(sessionID, "turn-1", "assistant", "all done", false)
+	if err != nil {
+		t.Fatalf("PendingMessageExists() error = %v", err)
+	}
+	if exists {
+		t.Error("a linked message must not count as pending")
+	}
+}
+
 func TestAppendToolUseMessages_IsIdempotentUnderConcurrency(t *testing.T) {
 	root := t.TempDir()
 	s, err := store.Init(root)

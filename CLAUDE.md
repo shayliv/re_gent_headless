@@ -103,7 +103,9 @@ Chosen: **annotated**. Storage cost is bounded (per-line hash arrays compress we
 
 We store conversation metadata alongside the file state. Current Claude and Codex hooks write normalized message rows into the SQLite index, store tool payloads as content-addressed blobs, and keep raw agent transcript snapshots as blobs when the host exposes a transcript path. Older data may still use the chained `Transcript` blob: `{ prev: hash, new_messages: [hash...] }`.
 
-This makes re_gent robust to host transcript churn: even if the live JSONL is rewritten or wiped, the SQLite index plus the content-addressed object store keep captured step context reconstructable.
+Hosts only hand us the *final* assistant message of a turn, so the narration and reasoning produced between tool calls is recovered by reading the host transcript. Every assistant text and reasoning block becomes a message row (`message_type` of `assistant` or `reasoning`) with a deterministic id derived from its identity and text, which makes the scan idempotent — it runs on each tool batch and again at `Stop` without duplicating rows. `rgt show` renders reasoning under a dimmed `Reasoning:` label.
+
+This makes re_gent robust to host transcript churn: even if the live JSONL is rewritten or wiped, the SQLite index plus the content-addressed object store keep captured step context reconstructable. Because assistant and reasoning blocks are captured eagerly, a later `/compact` or `/clear` cannot take back what was already recorded.
 
 ### Hook-driven capture
 

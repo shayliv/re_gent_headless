@@ -132,6 +132,10 @@ func printIndexedMessage(s *store.Store, msg index.Message) {
 		fmt.Printf("%s\n%s\n\n", style.Label("User:"), msg.ContentText)
 	case "assistant":
 		fmt.Printf("%s\n%s\n\n", style.Label("Assistant:"), msg.ContentText)
+	case "reasoning":
+		// Reasoning is the agent's internal narration; dim it so it reads as
+		// context rather than as something it said to the user.
+		fmt.Printf("%s\n%s\n\n", style.Label("Reasoning:"), style.DimText(msg.ContentText))
 	case "tool_call":
 		fmt.Printf("%s %s %s\n", style.Label("Tool call:"), msg.ToolName, msg.ToolUseID)
 		printBlob(s, store.Hash(msg.ToolInput))
