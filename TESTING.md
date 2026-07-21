@@ -122,6 +122,35 @@ printf '{"hook_event_name":"Stop","session_id":"codex-manual","turn_id":"turn-2"
 
 Expected result: no new step is created, and the no-tool messages do not attach to later tool-using turns.
 
+## Server Mode Under Induced Failures
+
+Server mode's failure behaviour is covered by automated tests against an in-process server
+(`internal/remotetest`) that can be told to go offline, inject faults, drop objects, or diverge.
+Each row of the failure-mode table in [docs/server-mode.md](docs/server-mode.md) maps to a named
+test there.
+
+```bash
+# Outage, partial write, divergence, server-side object loss, cache loss
+go test ./internal/remote/... ./internal/capture/... ./internal/cli/... -v -run 'Offline|Outage|Cooldown|Diverged|Network|Repair|Hydrate|Pull|Spool'
+```
+
+To exercise it by hand against a real server:
+
+```bash
+export REGENT_SERVER_URL=https://regent.example.com
+export REGENT_REPO_ID=my-project
+
+rgt sync --status              # queued work — never touches the network
+# stop the server, run an agent turn, then:
+rgt sync --status              # shows the lag; the agent turn was not blocked
+# start the server again:
+rgt sync                       # drains; --status then reports clean
+```
+
+Note: because capture consults the ambient environment, `REGENT_SERVER_URL` must be empty when
+running the local-mode suites. The `TestMain` guards in `internal/capture` and `cmd/rgt` do this
+automatically, so `go test ./...` is hermetic even on a machine configured for server mode.
+
 ## Full Verification
 
 ```bash

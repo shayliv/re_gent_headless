@@ -270,6 +270,28 @@ Hooks auto-configure on `rgt init`. No manual setup required.
 | `rgt cat <hash>` | Inspect any object by hash |
 | `rgt version` | Print version information |
 | `rgt completion` | Generate shell completion scripts |
+| `rgt sync` | Deliver queued server-mode capture (`--status`, `--pull`, `--repair`) |
+
+---
+
+## Server Mode
+
+re_gent can run with a re_gent server as the source of truth instead of a local `.regent/`
+directory — hooks talk to the server directly and the repository needs no local store at all.
+Capture is spooled to a machine-local cache when the server is unreachable, so an outage never
+blocks a live agent turn.
+
+```bash
+export REGENT_SERVER_URL=https://regent.example.com
+export REGENT_REPO_ID=my-project
+
+rgt sync --status   # what is queued (no network)
+rgt sync            # drain the queue now
+```
+
+See **[docs/server-mode.md](docs/server-mode.md)** for the configuration reference, the consistency
+guarantee, and the full failure-mode table (network blip, server down, partial write, divergence,
+cache loss) with the accepted risks stated explicitly.
 
 ---
 
