@@ -32,6 +32,8 @@ func main() {
 	rootCmd.AddCommand(OpenCodeHookCmd())
 	rootCmd.AddCommand(PiHookCmd())
 	rootCmd.AddCommand(cli.CatCmd())
+	rootCmd.AddCommand(cli.MergeCmd())
+	rootCmd.AddCommand(cli.PushCmd())
 	rootCmd.AddCommand(cli.VersionCmd())
 
 	// Disable alphabetical sorting to preserve our order
