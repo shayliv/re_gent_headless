@@ -95,6 +95,10 @@ func TestIndexStep_Basic(t *testing.T) {
 		t.Errorf("Tool name mismatch: got %s, want Write", steps[0].ToolName)
 	}
 
+	if steps[0].AgentID != "agent-1" {
+		t.Errorf("AgentID mismatch: got %q, want agent-1", steps[0].AgentID)
+	}
+
 	// Verify file was indexed
 	var fileCount int
 	err = idx.db.QueryRow("SELECT COUNT(*) FROM step_files WHERE step_id = ?", stepHash).Scan(&fileCount)

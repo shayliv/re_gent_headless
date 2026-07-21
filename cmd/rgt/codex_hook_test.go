@@ -200,6 +200,126 @@ func runToolBatchPayload(t *testing.T, payload string) {
 	})
 }
 
+func runMessageHookPayload(t *testing.T, direction string, payload string) {
+	t.Helper()
+	runWithStdin(t, payload, func() error {
+		return runMessageHook(nil, []string{direction})
+	})
+}
+
+// TestAgentIDFromPayloadOrEnv covers the two sources of agent_id for Claude Code subagents:
+// the JSON payload field and the CLAUDE_AGENT_ID env var set by the host process.
+func TestAgentIDFromPayloadOrEnv(t *testing.T) {
+	t.Run("payload takes precedence over env var", func(t *testing.T) {
+		t.Setenv("CLAUDE_AGENT_ID", "env-agent")
+		if got := agentIDFromPayloadOrEnv("payload-agent"); got != "payload-agent" {
+			t.Errorf("got %q, want payload-agent", got)
+		}
+	})
+	t.Run("falls back to CLAUDE_AGENT_ID when payload is empty", func(t *testing.T) {
+		t.Setenv("CLAUDE_AGENT_ID", "env-agent-xyz")
+		if got := agentIDFromPayloadOrEnv(""); got != "env-agent-xyz" {
+			t.Errorf("got %q, want env-agent-xyz", got)
+		}
+	})
+	t.Run("returns empty string when both are unset", func(t *testing.T) {
+		t.Setenv("CLAUDE_AGENT_ID", "")
+		if got := agentIDFromPayloadOrEnv(""); got != "" {
+			t.Errorf("got %q, want empty string", got)
+		}
+	})
+}
+
+// TestRunMessageHook_SubagentAgentIDCaptured verifies that a Task-spawned subagent's
+// agent_id in the hook payload flows through to the stored step and object store.
+func TestRunMessageHook_SubagentAgentIDCaptured(t *testing.T) {
+	root := t.TempDir()
+	if _, err := store.Init(root); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	agentID := "agent_subagent_abc123"
+
+	runMessageHookPayload(t, "user", fmt.Sprintf(`{"session_id":"sub-ses","cwd":%q,"turn_id":"turn-1","prompt":"do task","agent_id":%q}`, root, agentID))
+	if err := os.WriteFile(filepath.Join(root, "sub.txt"), []byte("sub\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	runToolBatchPayload(t, fmt.Sprintf(`{"session_id":"sub-ses","cwd":%q,"turn_id":"turn-1","agent_id":%q,"tool_calls":[{"tool_name":"Write","tool_use_id":"tool-sub-1","tool_input":{"file_path":"sub.txt","content":"sub\n"},"tool_response":{"ok":true}}]}`, root, agentID))
+	runMessageHookPayload(t, "assistant", fmt.Sprintf(`{"session_id":"sub-ses","cwd":%q,"turn_id":"turn-1","last_assistant_message":"done","agent_id":%q}`, root, agentID))
+
+	s, err := store.Open(filepath.Join(root, ".regent"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	idx, err := index.Open(s)
+	if err != nil {
+		t.Fatalf("open index: %v", err)
+	}
+	defer func() { _ = idx.Close() }()
+
+	sessionID := "claude_code--" + url.PathEscape("sub-ses")
+	steps, err := idx.ListSteps(sessionID, 10)
+	if err != nil {
+		t.Fatalf("list steps: %v", err)
+	}
+	if len(steps) != 1 {
+		t.Fatalf("expected 1 step, got %d", len(steps))
+	}
+	if steps[0].AgentID != agentID {
+		t.Errorf("index step AgentID = %q, want %q", steps[0].AgentID, agentID)
+	}
+
+	stepObj, err := s.ReadStep(steps[0].Hash)
+	if err != nil {
+		t.Fatalf("read step object: %v", err)
+	}
+	if stepObj.AgentID != agentID {
+		t.Errorf("step object AgentID = %q, want %q", stepObj.AgentID, agentID)
+	}
+}
+
+// TestRunMessageHook_SubagentAgentIDFromEnv verifies the CLAUDE_AGENT_ID env-var
+// fallback: when agent_id is absent from the payload (as in early Claude Code builds)
+// the env var set by the host process is used instead.
+func TestRunMessageHook_SubagentAgentIDFromEnv(t *testing.T) {
+	root := t.TempDir()
+	if _, err := store.Init(root); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	t.Setenv("CLAUDE_AGENT_ID", "env_agent_999")
+
+	// No agent_id field in any payload — falls back to CLAUDE_AGENT_ID.
+	runMessageHookPayload(t, "user", fmt.Sprintf(`{"session_id":"env-ses","cwd":%q,"turn_id":"turn-env","prompt":"env task"}`, root))
+	if err := os.WriteFile(filepath.Join(root, "env.txt"), []byte("env\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	runToolBatchPayload(t, fmt.Sprintf(`{"session_id":"env-ses","cwd":%q,"turn_id":"turn-env","tool_calls":[{"tool_name":"Write","tool_use_id":"tool-env-1","tool_input":{"file_path":"env.txt","content":"env\n"},"tool_response":{"ok":true}}]}`, root))
+	runMessageHookPayload(t, "assistant", fmt.Sprintf(`{"session_id":"env-ses","cwd":%q,"turn_id":"turn-env","last_assistant_message":"env done"}`, root))
+
+	s, err := store.Open(filepath.Join(root, ".regent"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	idx, err := index.Open(s)
+	if err != nil {
+		t.Fatalf("open index: %v", err)
+	}
+	defer func() { _ = idx.Close() }()
+
+	sessionID := "claude_code--" + url.PathEscape("env-ses")
+	steps, err := idx.ListSteps(sessionID, 10)
+	if err != nil {
+		t.Fatalf("list steps: %v", err)
+	}
+	if len(steps) != 1 {
+		t.Fatalf("expected 1 step, got %d", len(steps))
+	}
+	if steps[0].AgentID != "env_agent_999" {
+		t.Errorf("index step AgentID = %q, want env_agent_999", steps[0].AgentID)
+	}
+}
+
 func runWithStdin(t *testing.T, payload string, fn func() error) {
 	t.Helper()
 
