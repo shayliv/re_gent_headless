@@ -66,7 +66,13 @@ func createSchema(db *sql.DB) error {
 		tool_name   TEXT NOT NULL,
 		tool_use_id TEXT NOT NULL,
 		tree_hash   TEXT NOT NULL,
-		transcript_hash TEXT
+		transcript_hash TEXT,
+		usage_input_tokens          INTEGER,
+		usage_output_tokens         INTEGER,
+		usage_cache_creation_tokens INTEGER,
+		usage_cache_read_tokens     INTEGER,
+		usage_api_calls             INTEGER,
+		usage_subagents             INTEGER
 	);
 	CREATE INDEX IF NOT EXISTS idx_steps_session ON steps(session_id, ts_nanos);
 	CREATE INDEX IF NOT EXISTS idx_steps_parent ON steps(parent_id);
@@ -157,6 +163,12 @@ func migrateSchema(db *sql.DB) error {
 		"steps": {
 			`ALTER TABLE steps ADD COLUMN origin TEXT NOT NULL DEFAULT 'claude_code'`,
 			`ALTER TABLE steps ADD COLUMN turn_id TEXT`,
+			`ALTER TABLE steps ADD COLUMN usage_input_tokens INTEGER`,
+			`ALTER TABLE steps ADD COLUMN usage_output_tokens INTEGER`,
+			`ALTER TABLE steps ADD COLUMN usage_cache_creation_tokens INTEGER`,
+			`ALTER TABLE steps ADD COLUMN usage_cache_read_tokens INTEGER`,
+			`ALTER TABLE steps ADD COLUMN usage_api_calls INTEGER`,
+			`ALTER TABLE steps ADD COLUMN usage_subagents INTEGER`,
 		},
 		"messages": {
 			`ALTER TABLE messages ADD COLUMN turn_id TEXT`,
@@ -434,10 +446,16 @@ func (idx *DB) IndexStep(stepHash store.Hash, step *store.Step, tree *store.Tree
 	primaryCause := step.PrimaryCause()
 
 	// Insert step
+	stepUsage := store.Usage{}
+	if step.Usage != nil {
+		stepUsage = *step.Usage
+	}
 	_, err = tx.Exec(`
 		INSERT OR REPLACE INTO steps
-		(id, parent_id, session_id, origin, turn_id, agent_id, ts_nanos, tool_name, tool_use_id, tree_hash, transcript_hash)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(id, parent_id, session_id, origin, turn_id, agent_id, ts_nanos, tool_name, tool_use_id, tree_hash, transcript_hash,
+		 usage_input_tokens, usage_output_tokens, usage_cache_creation_tokens, usage_cache_read_tokens,
+		 usage_api_calls, usage_subagents)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		stepHash,
 		step.Parent,
@@ -450,6 +468,12 @@ func (idx *DB) IndexStep(stepHash store.Hash, step *store.Step, tree *store.Tree
 		primaryCause.ToolUseID,
 		step.Tree,
 		step.Transcript,
+		stepUsage.InputTokens,
+		stepUsage.OutputTokens,
+		stepUsage.CacheCreationTokens,
+		stepUsage.CacheReadTokens,
+		stepUsage.APICalls,
+		stepUsage.Subagents,
 	)
 	if err != nil {
 		return fmt.Errorf("insert step: %w", err)
@@ -574,13 +598,16 @@ type StepInfo struct {
 	TranscriptHash store.Hash
 	ArgsBlob       store.Hash
 	ResultBlob     store.Hash
+	Usage          store.Usage
 }
 
 // ListSteps returns recent steps for a session (newest first)
 func (idx *DB) ListSteps(sessionID string, limit int) ([]StepInfo, error) {
 	query := `
 		SELECT id, parent_id, session_id, origin, turn_id, ts_nanos, tool_name, tool_use_id,
-		       tree_hash, transcript_hash
+		       tree_hash, transcript_hash,
+		       usage_input_tokens, usage_output_tokens, usage_cache_creation_tokens,
+		       usage_cache_read_tokens, usage_api_calls, usage_subagents
 		FROM steps
 		WHERE session_id = ?
 		ORDER BY ts_nanos DESC
@@ -599,11 +626,25 @@ func (idx *DB) ListSteps(sessionID string, limit int) ([]StepInfo, error) {
 		var parentHash, turnID sql.NullString
 		var transcriptHash sql.NullString
 		var tsNanos int64
+		var inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens sql.NullInt64
+		var apiCalls, subagents sql.NullInt64
 
 		err := rows.Scan(&s.Hash, &parentHash, &s.SessionID, &s.Origin, &turnID, &tsNanos, &s.ToolName, &s.ToolUseID,
-			&s.TreeHash, &transcriptHash)
+			&s.TreeHash, &transcriptHash,
+			&inputTokens, &outputTokens, &cacheCreationTokens, &cacheReadTokens, &apiCalls, &subagents)
 		if err != nil {
 			return nil, err
+		}
+
+		// Steps recorded before usage capture, or with no readable transcript,
+		// leave these columns NULL; a zero Usage is the right reading for both.
+		s.Usage = store.Usage{
+			InputTokens:         inputTokens.Int64,
+			OutputTokens:        outputTokens.Int64,
+			CacheCreationTokens: cacheCreationTokens.Int64,
+			CacheReadTokens:     cacheReadTokens.Int64,
+			APICalls:            apiCalls.Int64,
+			Subagents:           subagents.Int64,
 		}
 
 		if parentHash.Valid {

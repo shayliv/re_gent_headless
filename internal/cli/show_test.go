@@ -180,6 +180,65 @@ func TestPrintStepMetadata_Basic(t *testing.T) {
 	}
 }
 
+func TestPrintStepMetadata_ShowsUsageWhenCaptured(t *testing.T) {
+	step := &store.Step{
+		SessionID:      "sess-1",
+		TimestampNanos: 1000000000,
+		Usage: &store.Usage{
+			InputTokens:         3,
+			OutputTokens:        114,
+			CacheCreationTokens: 19576,
+			CacheReadTokens:     16601,
+			APICalls:            2,
+			Subagents:           1,
+		},
+	}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printStepMetadata("full_step_hash_12chars", step)
+	w.Close()
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	os.Stdout = old
+
+	out := buf.String()
+	for _, want := range []string{"Tokens:", "3 in / 114 out", "19576 created", "16601 read", "36294 total", "API calls:", "Subagents:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q: %q", want, out)
+		}
+	}
+}
+
+// Steps captured before usage existed, or without a readable transcript, must
+// print exactly as they did before.
+func TestPrintStepMetadata_OmitsUsageWhenAbsent(t *testing.T) {
+	steps := map[string]*store.Step{
+		"no usage":   {SessionID: "sess-1", TimestampNanos: 1000000000},
+		"zero usage": {SessionID: "sess-1", TimestampNanos: 1000000000, Usage: &store.Usage{}},
+	}
+
+	for name, step := range steps {
+		t.Run(name, func(t *testing.T) {
+			old := os.Stdout
+			r, w, _ := os.Pipe()
+			os.Stdout = w
+
+			printStepMetadata("full_step_hash_12chars", step)
+			w.Close()
+			var buf bytes.Buffer
+			buf.ReadFrom(r)
+			os.Stdout = old
+
+			if out := buf.String(); strings.Contains(out, "Tokens:") || strings.Contains(out, "API calls:") {
+				t.Errorf("output should not mention usage: %q", out)
+			}
+		})
+	}
+}
+
 func TestPrintStepMetadata_Minimal(t *testing.T) {
 	step := &store.Step{
 		SessionID:      "minimal-sess",

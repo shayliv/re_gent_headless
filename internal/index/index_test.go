@@ -107,6 +107,87 @@ func TestIndexStep_Basic(t *testing.T) {
 	}
 }
 
+func TestIndexStep_PersistsUsage(t *testing.T) {
+	s, err := store.Init(t.TempDir())
+	if err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	idx, err := Open(s)
+	if err != nil {
+		t.Fatalf("open index: %v", err)
+	}
+	defer func() { _ = idx.Close() }()
+
+	blobHash, err := s.WriteBlob([]byte("test content"))
+	if err != nil {
+		t.Fatalf("write blob: %v", err)
+	}
+	tree := &store.Tree{Entries: []store.TreeEntry{{Path: "test.txt", Blob: blobHash, Mode: 0o644}}}
+	treeHash, err := s.WriteTree(tree)
+	if err != nil {
+		t.Fatalf("write tree: %v", err)
+	}
+
+	usage := store.Usage{
+		InputTokens:         3,
+		OutputTokens:        114,
+		CacheCreationTokens: 19576,
+		CacheReadTokens:     16601,
+		APICalls:            2,
+		Subagents:           1,
+	}
+	withUsage := &store.Step{
+		SessionID:      "usage-session",
+		TimestampNanos: time.Now().UnixNano(),
+		Tree:           treeHash,
+		Cause:          store.Cause{ToolName: "Write", ToolUseID: "tool_1"},
+		Usage:          &usage,
+		UsageTotal:     &usage,
+	}
+	withUsageHash, err := s.WriteStep(withUsage)
+	if err != nil {
+		t.Fatalf("write step: %v", err)
+	}
+	if err := idx.IndexStep(withUsageHash, withUsage, tree); err != nil {
+		t.Fatalf("index step: %v", err)
+	}
+
+	// A step captured without a transcript leaves the usage columns empty; it
+	// must still read back as a zero Usage rather than failing the scan.
+	withoutUsage := &store.Step{
+		SessionID:      "usage-session",
+		TimestampNanos: time.Now().UnixNano() + 1,
+		Tree:           treeHash,
+		Cause:          store.Cause{ToolName: "Write", ToolUseID: "tool_2"},
+	}
+	withoutUsageHash, err := s.WriteStep(withoutUsage)
+	if err != nil {
+		t.Fatalf("write step: %v", err)
+	}
+	if err := idx.IndexStep(withoutUsageHash, withoutUsage, tree); err != nil {
+		t.Fatalf("index step: %v", err)
+	}
+
+	steps, err := idx.ListSteps("usage-session", 10)
+	if err != nil {
+		t.Fatalf("list steps: %v", err)
+	}
+	if len(steps) != 2 {
+		t.Fatalf("expected 2 steps, got %d", len(steps))
+	}
+
+	byHash := map[store.Hash]StepInfo{}
+	for _, step := range steps {
+		byHash[step.Hash] = step
+	}
+	if got := byHash[withUsageHash].Usage; got != usage {
+		t.Fatalf("indexed usage = %+v, want %+v", got, usage)
+	}
+	if got := byHash[withoutUsageHash].Usage; !got.IsZero() {
+		t.Fatalf("expected zero usage for a step captured without one, got %+v", got)
+	}
+}
+
 func TestIndexStep_ParentChain(t *testing.T) {
 	tmpDir := t.TempDir()
 	s, err := store.Init(tmpDir)
@@ -746,6 +827,12 @@ func TestOpen_MigratesLegacySchema(t *testing.T) {
 	}{
 		{"steps", "origin"},
 		{"steps", "turn_id"},
+		{"steps", "usage_input_tokens"},
+		{"steps", "usage_output_tokens"},
+		{"steps", "usage_cache_creation_tokens"},
+		{"steps", "usage_cache_read_tokens"},
+		{"steps", "usage_api_calls"},
+		{"steps", "usage_subagents"},
 		{"messages", "turn_id"},
 		{"messages", "processed_at"},
 		{"sessions", "model"},
@@ -836,6 +923,12 @@ func TestOpen_MigratesPreForkLegacySchema(t *testing.T) {
 	}{
 		{"steps", "origin"},
 		{"steps", "turn_id"},
+		{"steps", "usage_input_tokens"},
+		{"steps", "usage_output_tokens"},
+		{"steps", "usage_cache_creation_tokens"},
+		{"steps", "usage_cache_read_tokens"},
+		{"steps", "usage_api_calls"},
+		{"steps", "usage_subagents"},
 		{"messages", "turn_id"},
 		{"messages", "processed_at"},
 		{"sessions", "model"},

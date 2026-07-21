@@ -66,7 +66,26 @@ func printStepMetadata(stepHash store.Hash, step *store.Step) {
 	if step.Parent != "" {
 		fmt.Printf("%s %s\n", style.Label("Parent:"), style.Hash(string(step.Parent[:16])))
 	}
+	printStepUsage(step.Usage)
 	fmt.Println()
+}
+
+// printStepUsage prints the API accounting for a step. Steps captured without a
+// readable transcript carry no usage and print nothing.
+func printStepUsage(usage *store.Usage) {
+	if usage == nil || usage.IsZero() {
+		return
+	}
+
+	fmt.Printf("%s %d in / %d out, cache %d created / %d read (%d total)\n",
+		style.Label("Tokens:"),
+		usage.InputTokens, usage.OutputTokens,
+		usage.CacheCreationTokens, usage.CacheReadTokens,
+		usage.TotalTokens())
+	fmt.Printf("%s %d\n", style.Label("API calls:"), usage.APICalls)
+	if usage.Subagents > 0 {
+		fmt.Printf("%s %d transcript(s) included\n", style.Label("Subagents:"), usage.Subagents)
+	}
 }
 
 func printStepCauses(s *store.Store, step *store.Step) {
