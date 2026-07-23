@@ -125,7 +125,7 @@ func TestPushIsIdempotent(t *testing.T) {
 	if _, err := Push(context.Background(), f.cache, f.cli, f.spool, testRef); err != nil {
 		t.Fatalf("first push: %v", err)
 	}
-	before := f.srv.Requests("POST")
+	before := len(f.srv.Objects())
 
 	res, err := Push(context.Background(), f.cache, f.cli, f.spool, testRef)
 	if err != nil {
@@ -134,8 +134,8 @@ func TestPushIsIdempotent(t *testing.T) {
 	if !res.AlreadyCurrent {
 		t.Fatal("second push should report the server is already current")
 	}
-	if got := f.srv.Requests("POST"); got != before {
-		t.Fatalf("second push uploaded %d object(s); a no-op push must touch nothing", got-before)
+	if got := len(f.srv.Objects()); got != before {
+		t.Fatalf("second push added %d object(s); a no-op push must touch nothing", got-before)
 	}
 	if f.srv.Ref(testRef) != tip {
 		t.Fatal("ref changed on a no-op push")
@@ -148,7 +148,7 @@ func TestPushUploadsOnlyTheDelta(t *testing.T) {
 	if _, err := Push(context.Background(), f.cache, f.cli, f.spool, testRef); err != nil {
 		t.Fatalf("first push: %v", err)
 	}
-	firstUploads := f.srv.Requests("POST")
+	firstUploads := len(f.srv.Objects())
 
 	// Only a.txt changes; big.txt must not be re-uploaded.
 	f.addStep(t, map[string]string{"a.txt": "two", "big.txt": "unchanged"}, "second")
@@ -161,8 +161,8 @@ func TestPushUploadsOnlyTheDelta(t *testing.T) {
 	if res.Objects != 5 {
 		t.Fatalf("delta push uploaded %d objects, want 5 (unchanged file must be skipped)", res.Objects)
 	}
-	if f.srv.Requests("POST") != firstUploads+5 {
-		t.Fatalf("unexpected upload count: %d", f.srv.Requests("POST")-firstUploads)
+	if got := len(f.srv.Objects()); got != firstUploads+5 {
+		t.Fatalf("unexpected upload count: %d", got-firstUploads)
 	}
 }
 

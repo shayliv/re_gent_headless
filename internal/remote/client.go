@@ -58,11 +58,15 @@ type Client interface {
 
 // HTTPClient is the production Client, speaking the re_gent server protocol:
 //
-//	HEAD /repos/{repo}/objects/{hash}   -> 200 | 404
-//	POST /repos/{repo}/objects          -> 201 {"hash":"..."}
-//	GET  /repos/{repo}/objects/{hash}   -> 200 <bytes> | 404
-//	GET  /repos/{repo}/refs/{ref...}    -> 200 {"hash":"..."} | 404
-//	PUT  /repos/{repo}/refs/{ref...}    -> 200 | 409 | 422
+//	HEAD /{repo}/objects/{hash}   -> 200 | 404
+//	GET  /{repo}/objects/{hash}   -> 200 <bytes> | 404
+//	PUT  /{repo}/objects/{hash}   -> 200 | 201 | 400
+//	GET  /{repo}/refs/{ref...}    -> 200 {"hash":"..."} | 404
+//	POST /{repo}/refs/{ref...}    -> 200 {"hash":"..."} | 409 {"hash":"..."} | 422
+//	                                 body: {"old":"<hash-or-empty>","new":"<hash>"}
+//
+// Note: {repo} is the first path segment, not prefixed by a literal "repos/"
+// segment — the server reserves the bare name "repos" for GET /repos (list).
 type HTTPClient struct {
 	baseURL string
 	repoID  string
@@ -88,11 +92,11 @@ func NewHTTPClient(cfg Config) (*HTTPClient, error) {
 }
 
 func (c *HTTPClient) objectURL(h store.Hash) string {
-	return fmt.Sprintf("%s/repos/%s/objects/%s", c.baseURL, c.repoID, h)
+	return fmt.Sprintf("%s/%s/objects/%s", c.baseURL, c.repoID, h)
 }
 
 func (c *HTTPClient) refURL(name string) string {
-	return fmt.Sprintf("%s/repos/%s/refs/%s", c.baseURL, c.repoID, name)
+	return fmt.Sprintf("%s/%s/refs/%s", c.baseURL, c.repoID, name)
 }
 
 // HasObject implements Client.
@@ -112,30 +116,22 @@ func (c *HTTPClient) HasObject(ctx context.Context, h store.Hash) (bool, error) 
 }
 
 // PutObject implements Client.
+//
+// Upload addresses the object by its own hash (PUT /{repo}/objects/{hash}),
+// matching the server's content-addressed write path: the server verifies the
+// body hashes to the URL's hash before storing it, so a successful response
+// is itself the integrity check — there is no response body to parse.
 func (c *HTTPClient) PutObject(ctx context.Context, content []byte) (store.Hash, error) {
 	if len(content) > MaxObjectSize {
 		return "", fmt.Errorf("%w: %d bytes", ErrTooLarge, len(content))
 	}
 	want := store.HashBytes(content)
 
-	resp, err := c.do(ctx, http.MethodPost, fmt.Sprintf("%s/repos/%s/objects", c.baseURL, c.repoID), content)
+	resp, err := c.do(ctx, http.MethodPut, c.objectURL(want), content)
 	if err != nil {
 		return "", err
 	}
-	defer closeBody(resp)
-
-	var body struct {
-		Hash string `json:"hash"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<10)).Decode(&body); err != nil {
-		return "", fmt.Errorf("decode object response: %w", err)
-	}
-	// The server is content-addressed with the same algorithm; a mismatch means
-	// we are talking to something that is not a re_gent server (or a proxy that
-	// mangled the body). Refuse to record a hash we did not verify.
-	if store.Hash(body.Hash) != want {
-		return "", fmt.Errorf("server stored object as %q but content hashes to %s", body.Hash, want)
-	}
+	closeBody(resp)
 	return want, nil
 }
 
@@ -203,14 +199,14 @@ func (c *HTTPClient) UpdateRef(ctx context.Context, name string, expected, next 
 	}
 
 	payload, err := json.Marshal(map[string]string{
-		"expected": string(expected),
-		"new":      string(next),
+		"old": string(expected),
+		"new": string(next),
 	})
 	if err != nil {
 		return fmt.Errorf("encode ref update: %w", err)
 	}
 
-	resp, err := c.do(ctx, http.MethodPut, c.refURL(name), payload)
+	resp, err := c.do(ctx, http.MethodPost, c.refURL(name), payload)
 	if err != nil {
 		return err
 	}
