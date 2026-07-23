@@ -1,0 +1,184 @@
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/regent-vcs/regent/internal/config"
+	"github.com/regent-vcs/regent/internal/index"
+	"github.com/regent-vcs/regent/internal/store"
+	"github.com/spf13/cobra"
+)
+
+// ErrNotSignedIn is returned when no auth token is found in the global config.
+var ErrNotSignedIn = fmt.Errorf("not signed in\n\nRun: rgt login <server-url>")
+
+// connectParams bundles everything runConnect needs; injectable for testing.
+type connectParams struct {
+	serverURL   string
+	projectRoot string
+	configPath  string // global config path; "" means default
+	httpClient  *http.Client
+}
+
+// ConnectCmd returns the cobra command for `rgt connect`.
+func ConnectCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "connect <server-url>",
+		Short: "Register this repo with a re_gent server and wire Claude hooks",
+		Long: `Register this repo with a remote re_gent server.
+
+connect checks that you are signed in (see: rgt login), registers the repo to
+obtain a repo_id, writes the remote URL and repo_id to .regent/config.toml, and
+installs Claude Code hooks. Running connect more than once is safe: hooks are
+merged rather than duplicated and existing config is preserved.`,
+		SilenceUsage: true,
+		Args:         cobra.ExactArgs(1),
+		Annotations: map[string]string{
+			"commandOrder": "1",
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("get working directory: %w", err)
+			}
+			return runConnect(connectParams{
+				serverURL:   strings.TrimRight(args[0], "/"),
+				projectRoot: cwd,
+			})
+		},
+	}
+	return cmd
+}
+
+func runConnect(p connectParams) error {
+	// 1. Load global user config and verify the user is signed in.
+	var userCfg *config.UserConfig
+	var err error
+	if p.configPath == "" {
+		userCfg, err = config.Load()
+	} else {
+		userCfg, err = config.LoadFrom(p.configPath)
+	}
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	if userCfg.Auth.Token == "" {
+		return ErrNotSignedIn
+	}
+	token := userCfg.Auth.Token
+
+	// 2. Initialise .regent/ if it doesn't exist.
+	regentDir := filepath.Join(p.projectRoot, ".regent")
+	var s *store.Store
+	if _, statErr := os.Stat(regentDir); os.IsNotExist(statErr) {
+		s, err = store.Init(p.projectRoot)
+		if err != nil {
+			return fmt.Errorf("init store: %w", err)
+		}
+		idx, err := index.Open(s)
+		if err != nil {
+			return fmt.Errorf("init index: %w", err)
+		}
+		_ = idx.Close()
+		if err := createRegentGitignore(p.projectRoot); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not create .regent/.gitignore: %v\n", err)
+		}
+		fmt.Printf("  ✓ Initialized .regent/\n")
+	} else {
+		s, err = store.Open(regentDir)
+		if err != nil {
+			return fmt.Errorf("open store: %w", err)
+		}
+		fmt.Printf("  - .regent/ already exists\n")
+	}
+
+	// 3. Check whether this repo is already connected to this server.
+	repoCfg, err := s.ReadRepoConfig()
+	if err != nil {
+		return fmt.Errorf("read repo config: %w", err)
+	}
+	if repoCfg.Remote.URL == p.serverURL && repoCfg.Remote.RepoID != "" {
+		fmt.Printf("  - Already connected to %s (repo_id: %s)\n", p.serverURL, repoCfg.Remote.RepoID)
+		return connectWireHooks(p.projectRoot)
+	}
+
+	// 4. Register the repo with the server.
+	repoID, err := registerRepo(p.serverURL, token, p.projectRoot, p.httpClient)
+	if err != nil {
+		return fmt.Errorf("register repo: %w", err)
+	}
+	fmt.Printf("  ✓ Registered (repo_id: %s)\n", repoID)
+
+	// 5. Write remote config to .regent/config.toml.
+	repoCfg.Remote.URL = p.serverURL
+	repoCfg.Remote.RepoID = repoID
+	if err := s.WriteRepoConfig(repoCfg); err != nil {
+		return fmt.Errorf("write repo config: %w", err)
+	}
+	fmt.Printf("  ✓ Wrote remote config\n")
+
+	// 6. Wire Claude hooks (merge/dedupe).
+	return connectWireHooks(p.projectRoot)
+}
+
+func connectWireHooks(projectRoot string) error {
+	result, err := installClaudeHook(projectRoot)
+	if err != nil {
+		return fmt.Errorf("install Claude hooks: %w", err)
+	}
+	if result.BackupPath != "" {
+		fmt.Fprintf(os.Stderr, "warning: backed up invalid hook config to %s\n", result.BackupPath)
+	}
+	fmt.Printf("  ✓ Claude Code hooks configured\n")
+	return nil
+}
+
+// registerRepo POSTs to <serverURL>/repos and returns the assigned repo_id.
+// A 401/403 response is converted to ErrNotSignedIn.
+func registerRepo(serverURL, token, projectRoot string, client *http.Client) (string, error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	body, _ := json.Marshal(map[string]string{"path": projectRoot})
+	req, err := http.NewRequest(http.MethodPost, serverURL+"/repos", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("POST %s/repos: %w", serverURL, err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusCreated:
+		// parse body below
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return "", ErrNotSignedIn
+	default:
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+
+	var result struct {
+		RepoID string `json:"repo_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode response: %w", err)
+	}
+	if result.RepoID == "" {
+		return "", fmt.Errorf("server returned empty repo_id")
+	}
+	return result.RepoID, nil
+}

@@ -23,6 +23,7 @@ func main() {
 	rootCmd.AddCommand(cli.LoginCmd())
 	rootCmd.AddCommand(cli.WhoamiCmd())
 	rootCmd.AddCommand(cli.PushCmd())
+	rootCmd.AddCommand(cli.ConnectCmd())
 	rootCmd.AddCommand(cli.LogCmd())
 	rootCmd.AddCommand(cli.StatusCmd())
 	rootCmd.AddCommand(cli.BlameCmd())
