@@ -13,6 +13,12 @@ type Cause struct {
 	ResultBlob Hash   `json:"result_blob,omitempty"`
 }
 
+// Author identifies the human who initiated this step.
+type Author struct {
+	Name  string `json:"name,omitempty"`
+	Email string `json:"email,omitempty"`
+}
+
 // Effect describes side effects of the step
 type Effect struct {
 	Kind       string `json:"kind"`       // "http_call", "db_write", "process_exec", ...
@@ -22,7 +28,7 @@ type Effect struct {
 // Step is the equivalent of a git commit
 type Step struct {
 	Parent          Hash     `json:"parent,omitempty"`
-	SecondaryParent Hash     `json:"secondary_parent,omitempty"` // for sub-agent merges
+	SecondaryParent Hash     `json:"secondary_parent,omitempty"` // merge second parent
 	Tree            Hash     `json:"tree"`
 	Transcript      Hash     `json:"transcript,omitempty"`
 	Config          Hash     `json:"config,omitempty"` // system prompt + tools + memory hash
@@ -32,6 +38,7 @@ type Step struct {
 	Origin          string   `json:"origin,omitempty"`
 	TurnID          string   `json:"turn_id,omitempty"`
 	AgentID         string   `json:"agent_id,omitempty"`
+	Author          Author   `json:"author,omitempty"` // human who initiated this step
 	TimestampNanos  int64    `json:"ts"`
 	Effects         []Effect `json:"effects,omitempty"`
 }

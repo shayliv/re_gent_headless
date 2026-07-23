@@ -531,6 +531,7 @@ func (r *Recorder) createStepForTurn(session SessionMetadata, scope turnScope) (
 			Origin:         session.Origin,
 			TurnID:         scope.id,
 			AgentID:        session.AgentID,
+			Author:         ResolveAuthor(),
 			TimestampNanos: time.Now().UnixNano(),
 		}
 
