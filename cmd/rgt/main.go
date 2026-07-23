@@ -30,15 +30,14 @@ func main() {
 	rootCmd.AddCommand(cli.ShowCmd())
 	rootCmd.AddCommand(cli.SessionsCmd())
 	rootCmd.AddCommand(cli.RewindCmd())
+	rootCmd.AddCommand(cli.ServeCmd())
 	rootCmd.AddCommand(cli.HookCmd())
 	rootCmd.AddCommand(MessageHookCmd())
 	rootCmd.AddCommand(ToolBatchHookCmd())
 	rootCmd.AddCommand(CodexHookCmd())
 	rootCmd.AddCommand(OpenCodeHookCmd())
 	rootCmd.AddCommand(PiHookCmd())
-	rootCmd.AddCommand(cli.PushCmd())
 	rootCmd.AddCommand(cli.CatCmd())
-	rootCmd.AddCommand(cli.ServeCmd())
 	rootCmd.AddCommand(cli.VersionCmd())
 
 	// Disable alphabetical sorting to preserve our order

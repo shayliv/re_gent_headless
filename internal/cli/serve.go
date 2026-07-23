@@ -2,91 +2,108 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/regent-vcs/regent/internal/server"
+	"github.com/regent-vcs/regent/internal/style"
 	"github.com/spf13/cobra"
 )
 
-// ServeCmd returns the `rgt serve` cobra command.
+// DefaultServeAddr is the address rgt serve binds when none is given.
+const DefaultServeAddr = "127.0.0.1:7654"
+
+type serveParams struct {
+	Addr          string
+	DataDir       string
+	MaxObjectSize int64
+}
+
+// ServeCmd creates the serve command: one server, many repos.
 func ServeCmd() *cobra.Command {
-	var (
-		addr    string
-		dataDir string
-	)
+	p := serveParams{Addr: DefaultServeAddr, MaxObjectSize: server.DefaultMaxObjectBytes}
 
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Start the regent demo HTTP server",
-		Long: `Starts the regent demo object/ref store server.
-
-The server stores objects and session refs per repository.
-Data is written to --data-dir (default: ~/.regent-server), which must not be
-inside your source repository.
-
-API:
-  POST /repos/{repo}/objects          upload an object (returns its hash)
-  GET  /repos/{repo}/objects/{hash}   download an object
-  GET  /repos/{repo}/refs/{ref...}    read a ref
-  PUT  /repos/{repo}/refs/{ref...}    CAS-update a ref (JSON body: {"expected":"","new":"<hash>"})
-  GET  /repos/{repo}/                 web view of a repository
-  GET  /                              web view listing all repositories`,
+		Short: "Serve re_gent repositories over HTTP",
+		Long: "Runs an object/ref server that hosts any number of repositories.\n" +
+			"Each repo is addressed by id (rgt push --repo <id>) and is stored\n" +
+			"separately, so histories and refs of different repos never mix.",
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if dataDir == "" {
-				home, err := os.UserHomeDir()
-				if err != nil {
-					return fmt.Errorf("could not determine home directory: %w", err)
-				}
-				dataDir = filepath.Join(home, ".regent-server")
-			}
-
-			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-				Level: slog.LevelInfo,
-			}))
-
-			srv, err := server.New(dataDir, logger)
-			if err != nil {
-				return fmt.Errorf("init server: %w", err)
-			}
-
-			ln, err := net.Listen("tcp", addr)
-			if err != nil {
-				return fmt.Errorf("listen %s: %w", addr, err)
-			}
-
-			httpSrv := &http.Server{Handler: srv}
-
-			logger.Info("regent demo server started",
-				"addr", ln.Addr().String(),
-				"data_dir", dataDir,
-			)
-
-			done := make(chan struct{})
-			go func() {
-				sig := make(chan os.Signal, 1)
-				signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-				<-sig
-				_ = httpSrv.Shutdown(context.Background())
-				close(done)
-			}()
-
-			if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
-				return fmt.Errorf("serve: %w", err)
-			}
-			<-done
-			return nil
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return runServe(ctx, p)
 		},
 	}
 
-	cmd.Flags().StringVarP(&addr, "addr", "a", ":7654", "TCP address to listen on")
-	cmd.Flags().StringVarP(&dataDir, "data-dir", "d", "", "directory for server data (default: ~/.regent-server)")
+	cmd.Flags().StringVar(&p.Addr, "addr", p.Addr, "address to listen on")
+	cmd.Flags().StringVar(&p.DataDir, "data", "", "directory holding served repos (default ~/.regent-server)")
+	cmd.Flags().Int64Var(&p.MaxObjectSize, "max-object-size", p.MaxObjectSize, "maximum accepted object size in bytes")
 
 	return cmd
+}
+
+// resolveDataDir returns the directory the server stores repos in.
+func resolveDataDir(dir string) (string, error) {
+	if dir != "" {
+		return filepath.Abs(dir)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".regent-server"), nil
+}
+
+// runServe starts the server and blocks until ctx is cancelled.
+func runServe(ctx context.Context, p serveParams) error {
+	dataDir, err := resolveDataDir(p.DataDir)
+	if err != nil {
+		return err
+	}
+	srv, err := server.New(dataDir, server.WithMaxObjectBytes(p.MaxObjectSize))
+	if err != nil {
+		return err
+	}
+
+	ln, err := net.Listen("tcp", p.Addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", p.Addr, err)
+	}
+
+	httpSrv := &http.Server{
+		Handler:           srv,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	repos, err := srv.ListRepos()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s serving %d repo(s) from %s on http://%s\n",
+		style.Brand("re_gent"), len(repos), dataDir, ln.Addr())
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- httpSrv.Serve(ln) }()
+
+	select {
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return httpSrv.Shutdown(shutdownCtx)
+	}
 }

@@ -268,8 +268,38 @@ Hooks auto-configure on `rgt init`. No manual setup required.
 | `rgt show <step>` | Display full context for a step (tool call + conversation) |
 | `rgt blame <path>[:<line>]` | Show per-line provenance for a file |
 | `rgt cat <hash>` | Inspect any object by hash |
+| `rgt serve` | Serve re_gent repositories over HTTP (`--addr`, `--data`) |
+| `rgt push` | Push session history to a repo on a server (`--url`, `--repo`, `--session`) |
 | `rgt version` | Print version information |
 | `rgt completion` | Generate shell completion scripts |
+
+---
+
+## Multiple repos, one server
+
+One `rgt serve` process hosts any number of repositories. Each repo is addressed
+by id and stored separately, so two repos never share refs, objects or history —
+even when they use the same session ids and contain identical files.
+
+```bash
+rgt serve --addr 127.0.0.1:7654 --data ~/.regent-server
+
+# in each project, once:
+cd ~/code/alpha && rgt push --url http://127.0.0.1:7654 --repo alpha
+cd ~/code/beta  && rgt push --url http://127.0.0.1:7654 --repo beta
+
+# afterwards the project remembers where it belongs:
+cd ~/code/alpha && rgt push
+```
+
+The first push records `[remote] url` and `repo_id` in `.regent/config.toml`, so
+later pushes need no flags. A project that is already bound keeps its identity:
+an explicit `--repo` pushes elsewhere once, it does not re-point the project.
+
+Objects are deduplicated *within* a repo, never across repos. Two projects that
+contain the same file hash it to the same address, and each repo stores its own
+copy — deduplicating across repos would leak one project's content into
+another's history.
 
 ---
 
