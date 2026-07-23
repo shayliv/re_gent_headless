@@ -442,6 +442,34 @@ func TestPrintIndexedMessage_User(t *testing.T) {
 	}
 }
 
+func TestPrintIndexedMessage_Reasoning(t *testing.T) {
+	root := t.TempDir()
+	s, err := store.Init(root)
+	if err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	msg := index.Message{MessageType: "reasoning", ContentText: "Weighing two approaches"}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printIndexedMessage(s, msg)
+	w.Close()
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	os.Stdout = old
+
+	out := buf.String()
+	if !strings.Contains(out, "Weighing two approaches") {
+		t.Errorf("output missing reasoning text: %q", out)
+	}
+	if !strings.Contains(out, "Reasoning:") {
+		t.Errorf("output missing the Reasoning label: %q", out)
+	}
+}
+
 func TestPrintIndexedMessage_Assistant(t *testing.T) {
 	root := t.TempDir()
 	s, err := store.Init(root)

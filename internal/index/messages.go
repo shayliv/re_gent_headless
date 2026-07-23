@@ -69,6 +69,76 @@ func (idx *DB) AppendMessage(msg Message) error {
 	return err
 }
 
+// AppendMessageIfNew appends a message unless a row with the same id already
+// exists, and reports whether a new row was inserted. Callers that derive the id
+// deterministically (e.g. from a transcript block) can therefore replay the same
+// source any number of times without duplicating rows.
+func (idx *DB) AppendMessageIfNew(msg Message) (bool, error) {
+	if msg.SessionID == "" {
+		return false, fmt.Errorf("session id is required")
+	}
+	if msg.ID == "" {
+		return false, fmt.Errorf("message id is required")
+	}
+
+	for attempt := 0; attempt < 8; attempt++ {
+		result, err := idx.db.Exec(`
+			INSERT INTO messages (id, session_id, step_id, turn_id, seq_num, timestamp, processed_at, message_type,
+			                      content_text, tool_name, tool_use_id, tool_input, tool_output)
+			SELECT ?, ?, ?, ?, COALESCE(MAX(seq_num), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ?
+			FROM messages
+			WHERE session_id = ?
+			ON CONFLICT (id) DO NOTHING
+		`, msg.ID, msg.SessionID, nullString(msg.StepID), nullString(msg.TurnID), msg.Timestamp,
+			nullInt64(msg.ProcessedAt), msg.MessageType,
+			nullString(msg.ContentText), nullString(msg.ToolName), nullString(msg.ToolUseID),
+			nullString(msg.ToolInput), nullString(msg.ToolOutput), msg.SessionID)
+		if err != nil {
+			if isSQLiteBusy(err) {
+				time.Sleep(sqliteBusyBackoff(attempt))
+				continue
+			}
+			return false, err
+		}
+		return rowsChanged(result), nil
+	}
+	return false, fmt.Errorf("append message: database remained busy")
+}
+
+// PendingMessageExists reports whether an unprocessed message of the given type
+// with exactly this content is already recorded for the session (and turn, when
+// allTurns is false). It lets the Stop hook skip re-appending a final assistant
+// message that transcript capture already stored for the same turn.
+func (idx *DB) PendingMessageExists(sessionID, turnID, messageType, contentText string, allTurns bool) (bool, error) {
+	if sessionID == "" {
+		return false, fmt.Errorf("session id is required")
+	}
+	if !allTurns && turnID == "" {
+		return false, fmt.Errorf("turn id is required")
+	}
+	if contentText == "" {
+		return false, nil
+	}
+
+	query := `
+		SELECT COUNT(*)
+		FROM messages
+		WHERE session_id = ?
+		  AND message_type = ?
+		  AND content_text = ?
+		  AND step_id IS NULL
+		  AND processed_at IS NULL
+	`
+	args := []interface{}{sessionID, messageType, contentText}
+	query, args = appendTurnClause(query, args, turnID, allTurns)
+
+	var count int
+	if err := idx.db.QueryRow(query, args...).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // AppendToolUseMessages atomically stores a tool call/result pair once.
 func (idx *DB) AppendToolUseMessages(call, result Message) (bool, error) {
 	if call.SessionID == "" {
