@@ -25,6 +25,65 @@ type Effect struct {
 	Descriptor string `json:"descriptor"` // human-readable summary
 }
 
+// Usage holds the model API accounting for a step: tokens billed, cache
+// creation/read tokens, and how many API calls produced them. Counts are read
+// from the agent host's transcript; they are never derived from message text,
+// so a Usage value carries no conversation content.
+//
+// Subagents is the number of subagent transcripts folded into the counts.
+type Usage struct {
+	InputTokens         int64 `json:"input_tokens,omitempty"`
+	OutputTokens        int64 `json:"output_tokens,omitempty"`
+	CacheCreationTokens int64 `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadTokens     int64 `json:"cache_read_input_tokens,omitempty"`
+	APICalls            int64 `json:"api_calls,omitempty"`
+	Subagents           int64 `json:"subagents,omitempty"`
+}
+
+// IsZero reports whether every counter is zero.
+func (u Usage) IsZero() bool {
+	return u == Usage{}
+}
+
+// Add returns the field-wise sum of u and other.
+func (u Usage) Add(other Usage) Usage {
+	return Usage{
+		InputTokens:         u.InputTokens + other.InputTokens,
+		OutputTokens:        u.OutputTokens + other.OutputTokens,
+		CacheCreationTokens: u.CacheCreationTokens + other.CacheCreationTokens,
+		CacheReadTokens:     u.CacheReadTokens + other.CacheReadTokens,
+		APICalls:            u.APICalls + other.APICalls,
+		Subagents:           u.Subagents + other.Subagents,
+	}
+}
+
+// Sub returns the field-wise difference u - other, clamped at zero. Clamping
+// matters because the baseline can exceed the current reading when the host
+// starts a fresh transcript (for example after /compact); such a step reports
+// no usage rather than a negative count.
+func (u Usage) Sub(other Usage) Usage {
+	return Usage{
+		InputTokens:         clampedSub(u.InputTokens, other.InputTokens),
+		OutputTokens:        clampedSub(u.OutputTokens, other.OutputTokens),
+		CacheCreationTokens: clampedSub(u.CacheCreationTokens, other.CacheCreationTokens),
+		CacheReadTokens:     clampedSub(u.CacheReadTokens, other.CacheReadTokens),
+		APICalls:            clampedSub(u.APICalls, other.APICalls),
+		Subagents:           clampedSub(u.Subagents, other.Subagents),
+	}
+}
+
+// TotalTokens returns every token counter added together.
+func (u Usage) TotalTokens() int64 {
+	return u.InputTokens + u.OutputTokens + u.CacheCreationTokens + u.CacheReadTokens
+}
+
+func clampedSub(a, b int64) int64 {
+	if a <= b {
+		return 0
+	}
+	return a - b
+}
+
 // Step is the equivalent of a git commit
 type Step struct {
 	Parent          Hash     `json:"parent,omitempty"`
@@ -41,6 +100,14 @@ type Step struct {
 	Author          Author   `json:"author,omitempty"` // human who initiated this step
 	TimestampNanos  int64    `json:"ts"`
 	Effects         []Effect `json:"effects,omitempty"`
+
+	// Usage is the API usage attributed to this step: the delta between the
+	// transcript's totals now and the totals recorded on the parent step.
+	// UsageTotal is the transcript-cumulative reading at this step and is what
+	// the next step subtracts from. Both are nil when the host gave us no
+	// readable transcript, which keeps older steps byte-identical.
+	Usage      *Usage `json:"usage,omitempty"`
+	UsageTotal *Usage `json:"usage_total,omitempty"`
 }
 
 // PrimaryCause returns the canonical cause used for legacy displays and indexes.

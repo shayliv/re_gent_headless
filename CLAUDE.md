@@ -122,6 +122,7 @@ Other agent tools can add small adapters that produce the same internal capture 
 | **Tree** | A snapshot of the workspace at one step. `{ path → (blob_hash, blame_hash, mode) }`. |
 | **BlameMap** | A parallel array to a file's lines, where each entry is the step hash that introduced or last modified that line. |
 | **Transcript** | Legacy chained delta object: pointer to previous transcript + list of new message blob hashes. Current hooks primarily use SQLite `messages` plus optional raw transcript archive blobs. |
+| **Usage** | The API accounting attached to a step: input/output tokens, cache-creation and cache-read tokens, and API-call count, read from the host transcript (including subagent transcripts, recursively). Stored per step as a delta plus the cumulative reading the next step measures against. |
 | **Effect** | An "uncompensated side effect" attached to a step — something that happened (HTTP call, db write) that a rewind cannot undo. Logged for transparency. |
 | **Session** | A continuous stream of agent activity from one host (one Claude Code process, one SDK run). Has its own ref (branch). |
 | **Agent** | An identity within a session. Sub-agents (e.g. spawned via Task tool) get their own agent_id but share session lineage. |

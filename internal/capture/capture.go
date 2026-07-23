@@ -17,6 +17,7 @@ import (
 	"github.com/regent-vcs/regent/internal/remote"
 	"github.com/regent-vcs/regent/internal/snapshot"
 	"github.com/regent-vcs/regent/internal/store"
+	"github.com/regent-vcs/regent/internal/usage"
 )
 
 const (
@@ -26,6 +27,12 @@ const (
 	OriginPi         = "pi"
 
 	maxRefUpdateAttempts = 8
+
+	// maxUsageBaselineWalk bounds how far back we look for the last recorded
+	// usage total. Every step normally carries one, so the walk stops at the
+	// parent; the bound only caps the cost when a run of steps was captured
+	// without a readable transcript.
+	maxUsageBaselineWalk = 64
 )
 
 var messageCounter atomic.Uint64
@@ -535,6 +542,11 @@ func (r *Recorder) archiveLegacySessionRef(externalID string, head store.Hash) e
 
 func (r *Recorder) createStepForTurn(session SessionMetadata, scope turnScope) (store.Hash, error) {
 	sessionID := session.SessionID
+
+	// Read the transcript once, before the ref-conflict retry loop: it is the
+	// same file on every attempt, and re-parsing it would only slow the turn.
+	cumulativeUsage, haveUsage := r.collectUsage(session)
+
 	for attempt := 0; attempt < maxRefUpdateAttempts; attempt++ {
 		parentHash, err := r.Store.ReadRef("sessions/" + sessionID)
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -567,6 +579,9 @@ func (r *Recorder) createStepForTurn(session SessionMetadata, scope turnScope) (
 			AgentID:        session.AgentID,
 			Author:         ResolveAuthor(),
 			TimestampNanos: time.Now().UnixNano(),
+		}
+		if haveUsage {
+			r.attachUsage(step, parentHash, cumulativeUsage)
 		}
 
 		stepHash, err := r.Store.WriteStep(step)
@@ -605,6 +620,70 @@ func (r *Recorder) createStepForTurn(session SessionMetadata, scope turnScope) (
 	}
 
 	return "", fmt.Errorf("update ref: %w", store.ErrRefConflict)
+}
+
+// collectUsage reads the API usage recorded in the session's transcript,
+// including every subagent transcript it spawned. It reports false when there
+// is nothing to attribute, so a step written without a transcript stays exactly
+// as it was before usage capture existed.
+//
+// The transcript is the host's, not ours: it can be absent, mid-write, or in a
+// format we do not recognise. Every one of those degrades to "no usage" and a
+// line in the hook error log, never to a failed turn.
+func (r *Recorder) collectUsage(session SessionMetadata) (store.Usage, bool) {
+	if session.TranscriptPath == "" {
+		return store.Usage{}, false
+	}
+
+	report, err := usage.Collect(session.TranscriptPath)
+	if err != nil {
+		// The error names files and syscalls, never transcript content.
+		LogHookError(r.Store.Root, fmt.Sprintf("collect transcript usage: %v", err))
+	}
+	if report.Total.IsZero() {
+		return store.Usage{}, false
+	}
+	return report.Total, true
+}
+
+// attachUsage records the cumulative transcript reading on the step and the
+// share of it this step is responsible for.
+//
+// The transcript reports session totals, not per-turn ones, so a step's own
+// usage is the reading now minus the reading stored on its parent. Usage the
+// host has not yet flushed is therefore not lost: it lands on the next step,
+// because the baseline only ever moves forward by what we actually recorded.
+func (r *Recorder) attachUsage(step *store.Step, parentHash store.Hash, cumulative store.Usage) {
+	total := cumulative
+	step.UsageTotal = &total
+
+	delta := cumulative.Sub(r.parentUsageTotal(parentHash))
+	if delta.IsZero() {
+		return
+	}
+	step.Usage = &delta
+}
+
+// parentUsageTotal returns the most recent cumulative usage recorded in the
+// step's ancestry, or the zero value when there is none.
+//
+// It walks past ancestors that carry no reading rather than stopping at the
+// parent. A turn whose transcript was briefly unreadable records no total, and
+// treating that gap as a zero baseline would charge the next step for
+// everything the session had already spent.
+func (r *Recorder) parentUsageTotal(parentHash store.Hash) store.Usage {
+	for current, walked := parentHash, 0; current != "" && walked < maxUsageBaselineWalk; walked++ {
+		step, err := r.Store.ReadStep(current)
+		if err != nil {
+			LogHookError(r.Store.Root, fmt.Sprintf("read step %s for usage baseline: %v", current, err))
+			return store.Usage{}
+		}
+		if step.UsageTotal != nil {
+			return *step.UsageTotal
+		}
+		current = step.Parent
+	}
+	return store.Usage{}
 }
 
 func refUpdateBackoff(attempt int) time.Duration {
