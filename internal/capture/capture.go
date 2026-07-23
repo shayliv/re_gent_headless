@@ -33,6 +33,9 @@ type Recorder struct {
 	Store *store.Store
 	Index *index.DB
 	CWD   string
+	// Sink receives blobs and ref updates for optional remote replication.
+	// nil is treated as a NoopSink: local writes still succeed.
+	Sink CaptureSink
 }
 
 type turnScope struct {
@@ -93,10 +96,37 @@ func Open(cwd string) (*Recorder, bool, error) {
 }
 
 func (r *Recorder) Close() error {
-	if r == nil || r.Index == nil {
+	if r == nil {
 		return nil
 	}
-	return r.Index.Close()
+	var errs []error
+	if r.Sink != nil {
+		if err := r.Sink.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if r.Index != nil {
+		if err := r.Index.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// enqueueBlobToSink forwards a locally-committed blob to the sink for optional
+// remote replication. No-ops when Sink is nil.
+func (r *Recorder) enqueueBlobToSink(hash store.Hash, data []byte) {
+	if r.Sink != nil {
+		r.Sink.EnqueueBlob(hash, data)
+	}
+}
+
+// enqueueRefToSink forwards a locally-committed ref update to the sink.
+// No-ops when Sink is nil.
+func (r *Recorder) enqueueRefToSink(name string, old, new store.Hash) {
+	if r.Sink != nil {
+		r.Sink.EnqueueRef(name, old, new)
+	}
 }
 
 func (r *Recorder) UpsertSession(meta SessionMetadata) error {
@@ -174,6 +204,7 @@ func (r *Recorder) RecordToolUse(event ToolUse) error {
 	if err != nil {
 		return fmt.Errorf("store tool input: %w", err)
 	}
+	r.enqueueBlobToSink(inputHash, event.ToolInput)
 
 	var outputHash store.Hash
 	if len(event.ToolResponse) > 0 {
@@ -181,6 +212,7 @@ func (r *Recorder) RecordToolUse(event ToolUse) error {
 		if err != nil {
 			return fmt.Errorf("store tool output: %w", err)
 		}
+		r.enqueueBlobToSink(outputHash, event.ToolResponse)
 	}
 
 	now := time.Now().UnixNano()
@@ -507,6 +539,14 @@ func (r *Recorder) createStepForTurn(session SessionMetadata, scope turnScope) (
 			return "", fmt.Errorf("write step: %w", err)
 		}
 
+		// Enqueue the step blob for remote replication. We re-marshal here so we
+		// have the raw bytes without an extra store read-back.
+		if r.Sink != nil {
+			if stepData, merr := marshalStep(step); merr == nil {
+				r.enqueueBlobToSink(stepHash, stepData)
+			}
+		}
+
 		if err := computeAndWriteBlame(r.Store, parentHash, stepHash, treeHash); err != nil {
 			LogHookError(r.Store.Root, fmt.Sprintf("blame step %s: %v", stepHash, err))
 		}
@@ -518,6 +558,9 @@ func (r *Recorder) createStepForTurn(session SessionMetadata, scope turnScope) (
 			}
 			return "", fmt.Errorf("update ref: %w", err)
 		}
+
+		// Replicate the ref update after local CAS succeeds.
+		r.enqueueRefToSink("sessions/"+sessionID, parentHash, stepHash)
 
 		if err := r.indexAndLinkStep(stepHash, sessionID, scope); err != nil {
 			LogHookError(r.Store.Root, fmt.Sprintf("index/link step %s: %v", stepHash, err))
@@ -635,6 +678,13 @@ func causesFromMessages(messages []index.Message) []store.Cause {
 		causes = append(causes, cause)
 	}
 	return causes
+}
+
+// marshalStep serializes a step to the same JSON format that WriteStep uses,
+// producing bytes that hash to the same value already stored in the object store.
+func marshalStep(step *store.Step) ([]byte, error) {
+	step.NormalizeCauses()
+	return json.Marshal(step)
 }
 
 func snapshotWorkspace(s *store.Store, cwd string) (store.Hash, error) {
