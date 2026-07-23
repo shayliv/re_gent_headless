@@ -31,6 +31,7 @@ func main() {
 	rootCmd.AddCommand(cli.SessionsCmd())
 	rootCmd.AddCommand(cli.RewindCmd())
 	rootCmd.AddCommand(cli.ServeCmd())
+	rootCmd.AddCommand(cli.SyncCmd())
 	rootCmd.AddCommand(cli.HookCmd())
 	rootCmd.AddCommand(MessageHookCmd())
 	rootCmd.AddCommand(ToolBatchHookCmd())

@@ -14,6 +14,7 @@ import (
 
 	"github.com/regent-vcs/regent/internal/ignore"
 	"github.com/regent-vcs/regent/internal/index"
+	"github.com/regent-vcs/regent/internal/remote"
 	"github.com/regent-vcs/regent/internal/snapshot"
 	"github.com/regent-vcs/regent/internal/store"
 )
@@ -36,6 +37,9 @@ type Recorder struct {
 	// Sink receives blobs and ref updates for optional remote replication.
 	// nil is treated as a NoopSink: local writes still succeed.
 	Sink CaptureSink
+	// Server is non-nil in server mode, where the source of truth is a re_gent
+	// server and Store is a disposable machine-local cache. See servermode.go.
+	Server *ServerLink
 }
 
 type turnScope struct {
@@ -74,14 +78,35 @@ type ToolUse struct {
 	ToolResponse json.RawMessage
 }
 
+// Open returns the recorder for this working directory.
+//
+// Server mode wins when it is configured: the source of truth is then the
+// server and the repository needs no .regent/ directory at all. If server mode
+// is configured but cannot be initialised, capture falls back to local mode
+// (and to a clean no-op when there is no local store) rather than failing the
+// agent's turn.
 func Open(cwd string) (*Recorder, bool, error) {
 	if cwd == "" {
 		return nil, false, fmt.Errorf("cwd is required")
 	}
 
+	cfg, enabled, cfgErr := serverConfigFor(remote.OSEnv, remote.DefaultConfigPath())
+	if cfgErr != nil {
+		logServerModeFallback(cfg, cfgErr)
+	}
+	if enabled {
+		rec, err := OpenServerMode(cwd, cfg)
+		if err == nil {
+			// Deliver anything a previous invocation could not.
+			rec.SyncToServer("hook start")
+			return rec, true, nil
+		}
+		logServerModeFallback(cfg, err)
+	}
+
 	s, err := store.Open(filepath.Join(cwd, ".regent"))
 	if err != nil {
-		if strings.Contains(err.Error(), "regent store not found") {
+		if errors.Is(err, store.ErrNotRegentRepository) {
 			return nil, false, nil
 		}
 		return nil, false, fmt.Errorf("open store: %w", err)
@@ -256,6 +281,11 @@ func (r *Recorder) RecordAssistantAndFinalize(event AssistantResponse) error {
 		return err
 	}
 
+	// The end of a turn is the delivery point: by now the step, its tree and
+	// its tool payloads exist locally. Deferred so a partially recorded turn is
+	// still delivered rather than stranded in the cache.
+	defer r.SyncToServer("turn end")
+
 	if !scope.allTurns {
 		existingStep, ok, err := r.existingStepForTurn(session.SessionID, scope.id)
 		if err != nil {
@@ -319,6 +349,10 @@ func (r *Recorder) ArchiveTranscript(sessionID, transcriptPath string) error {
 	if err != nil {
 		return fmt.Errorf("write transcript blob: %w", err)
 	}
+
+	// A transcript archive is not reachable from any step, so the DAG walk that
+	// pushes a session cannot find it. Queue it explicitly.
+	r.markLooseObject(blobHash)
 
 	return r.Index.InsertJSONLSnapshot(sessionID, time.Now().UnixNano(), blobHash)
 }
@@ -690,6 +724,14 @@ func marshalStep(step *store.Step) ([]byte, error) {
 
 func snapshotWorkspace(s *store.Store, cwd string) (store.Hash, error) {
 	return snapshot.Snapshot(s, cwd, ignore.Default(cwd))
+}
+
+// ComputeAndWriteBlame derives the per-line provenance sidecars for one step by
+// diffing its tree against its parent's. Blame maps are derived data, not
+// canonical state, so they are recomputed rather than transferred when a cache
+// is rebuilt from the server.
+func ComputeAndWriteBlame(s *store.Store, parentHash, currentStepHash, treeHash store.Hash) error {
+	return computeAndWriteBlame(s, parentHash, currentStepHash, treeHash)
 }
 
 func computeAndWriteBlame(s *store.Store, parentHash, currentStepHash, treeHash store.Hash) error {

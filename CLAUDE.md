@@ -173,6 +173,15 @@ Current artifacts:
 - [`README.md`](./README.md) — user-facing overview and install notes.
 - [`TESTING.md`](./TESTING.md) — current manual and automated verification guide.
 - [`CLAUDE.md`](./CLAUDE.md) — this architecture context.
+- [`docs/server-mode.md`](./docs/server-mode.md) — server mode: the consistency guarantee, the
+  offline queue, and the failure-mode table. Read this before changing anything in
+  `internal/remote` or the server-mode paths in `internal/capture`.
+
+**Server mode** is the alternative to the local-first model described above: when a server URL and
+repo id are configured, the server is the source of truth, the repository needs no `.regent/`
+directory, and `internal/store` is backed by a disposable machine-local cache outside the workspace.
+Capture spools to that cache when the server is unreachable so a live agent turn is never blocked.
+Local mode remains the default and is unchanged.
 
 ---
 

@@ -130,3 +130,8 @@ func TestServeCmdFlagDefaults(t *testing.T) {
 		t.Fatal("rgt serve should reject positional arguments")
 	}
 }
+
+// nopWriter silences cobra output during tests.
+type nopWriter struct{}
+
+func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }

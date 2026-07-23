@@ -10,11 +10,19 @@ import (
 	"lukechampine.com/blake3"
 )
 
+// HashBytes returns the content address of the given bytes without storing
+// them. It is the single definition of re_gent's object identity, so callers
+// that need to verify content they did not write (for example bytes received
+// from a server) hash it exactly the way WriteBlob would.
+func HashBytes(content []byte) Hash {
+	h := blake3.Sum256(content)
+	return Hash(hex.EncodeToString(h[:]))
+}
+
 // WriteBlob writes content to the object store and returns its hash.
 // Content-addressed: identical content produces identical hash.
 func (s *Store) WriteBlob(content []byte) (Hash, error) {
-	h := blake3.Sum256(content)
-	hashStr := hex.EncodeToString(h[:])
+	hashStr := string(HashBytes(content))
 
 	// Shard by first 2 hex chars for filesystem efficiency
 	dir := filepath.Join(s.Root, "objects", hashStr[:2])

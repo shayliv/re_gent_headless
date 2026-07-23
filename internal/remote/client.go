@@ -1,9 +1,3 @@
-// Package remote is the client side of the re_gent server protocol.
-//
-// A Client is bound to exactly one (server URL, repo id) pair. Repo identity is
-// therefore carried on every request rather than being implied by ambient
-// state: two repos on the same server are two Clients, and neither can address
-// the other's objects or refs.
 package remote
 
 import (
@@ -14,308 +8,384 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
-	"github.com/regent-vcs/regent/internal/server"
 	"github.com/regent-vcs/regent/internal/store"
 )
 
-// maxErrorBodyBytes caps how much of an error response is quoted back.
-const maxErrorBodyBytes = 4 << 10
+// MaxObjectSize mirrors the server's per-object limit. Objects larger than this
+// are rejected client-side so the failure is a clear local error instead of a
+// truncated upload.
+const MaxObjectSize = 50 << 20
 
-// maxObjectBytes caps how much a client will read for a single object.
-const maxObjectBytes = server.DefaultMaxObjectBytes
+// maxRetries bounds retries for a single request. The context deadline is the
+// real budget; this only stops a fast-failing server from being hammered.
+const maxRetries = 3
 
 var (
-	// ErrRepoNotFound means the server has no repo with this id yet.
-	ErrRepoNotFound = errors.New("remote: repo not found")
-	// ErrObjectNotFound means the object is absent from this repo on the server.
-	ErrObjectNotFound = errors.New("remote: object not found")
-	// ErrRefNotFound means the ref does not exist in this repo on the server.
-	ErrRefNotFound = errors.New("remote: ref not found")
+	// ErrNotFound is returned when an object or ref does not exist on the server.
+	ErrNotFound = errors.New("not found on server")
+	// ErrConflict is returned when a ref CAS loses a race with another writer.
+	ErrConflict = errors.New("ref was modified concurrently on the server")
+	// ErrUnauthorized is returned for 401/403 responses. It is never retried:
+	// a bad token does not get better by trying again.
+	ErrUnauthorized = errors.New("server rejected credentials")
+	// ErrIncomplete is returned when the server refuses a ref update because
+	// objects the step references were never received (HTTP 422). It signals
+	// the caller to re-push the full history rather than the delta.
+	ErrIncomplete = errors.New("server is missing objects referenced by this step")
+	// ErrTooLarge is returned when an object exceeds MaxObjectSize.
+	ErrTooLarge = errors.New("object exceeds server size limit")
 )
 
-// Client talks to one repo on one re_gent server.
-type Client struct {
+// Client is the subset of the server protocol that capture and the sync
+// commands depend on. It is an interface so tests can inject faults without a
+// network stack.
+type Client interface {
+	// HasObject reports whether the server already stores the object.
+	HasObject(ctx context.Context, h store.Hash) (bool, error)
+	// PutObject uploads object bytes. It is idempotent: the server is
+	// content-addressed, so re-uploading the same bytes is a no-op.
+	PutObject(ctx context.Context, content []byte) (store.Hash, error)
+	// GetObject downloads object bytes, verifying the hash before returning.
+	GetObject(ctx context.Context, h store.Hash) ([]byte, error)
+	// GetRef reads a ref. It returns ErrNotFound when the ref does not exist.
+	GetRef(ctx context.Context, name string) (store.Hash, error)
+	// UpdateRef compare-and-swaps a ref. expected is "" for a new ref.
+	UpdateRef(ctx context.Context, name string, expected, next store.Hash) error
+}
+
+// HTTPClient is the production Client, speaking the re_gent server protocol:
+//
+//	HEAD /repos/{repo}/objects/{hash}   -> 200 | 404
+//	POST /repos/{repo}/objects          -> 201 {"hash":"..."}
+//	GET  /repos/{repo}/objects/{hash}   -> 200 <bytes> | 404
+//	GET  /repos/{repo}/refs/{ref...}    -> 200 {"hash":"..."} | 404
+//	PUT  /repos/{repo}/refs/{ref...}    -> 200 | 409 | 422
+type HTTPClient struct {
 	baseURL string
 	repoID  string
+	token   string
 	http    *http.Client
 }
 
-// NewClient validates the server URL and repo id and returns a Client bound to
-// that repo. The repo id is validated with the server's own rule so a client
-// can never construct an identity the server would reject.
-func NewClient(baseURL, repoID string) (*Client, error) {
-	u, err := url.Parse(strings.TrimSpace(baseURL))
-	if err != nil {
-		return nil, fmt.Errorf("invalid server url %q: %w", baseURL, err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("invalid server url %q: expected http:// or https://", baseURL)
-	}
-	if u.Host == "" {
-		return nil, fmt.Errorf("invalid server url %q: missing host", baseURL)
-	}
-	if err := server.ValidateRepoID(repoID); err != nil {
+// NewHTTPClient builds a Client for cfg. The configuration is validated up
+// front so that a malformed server URL fails before any hook runs.
+func NewHTTPClient(cfg Config) (*HTTPClient, error) {
+	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	return &Client{
-		baseURL: strings.TrimSuffix(u.String(), "/"),
-		repoID:  repoID,
-		http:    &http.Client{Timeout: 30 * time.Second},
+	return &HTTPClient{
+		baseURL: strings.TrimRight(cfg.ServerURL, "/"),
+		repoID:  cfg.RepoID,
+		token:   cfg.Token,
+		// No client-level timeout: every call carries a context deadline, which
+		// also covers retries. A Client.Timeout here would silently split that
+		// budget per attempt.
+		http: &http.Client{},
 	}, nil
 }
 
-// RepoID returns the repo this client is bound to.
-func (c *Client) RepoID() string { return c.repoID }
-
-// BaseURL returns the server root this client talks to.
-func (c *Client) BaseURL() string { return c.baseURL }
-
-// SetHTTPClient overrides the HTTP client (used by tests and for custom timeouts).
-func (c *Client) SetHTTPClient(h *http.Client) {
-	if h != nil {
-		c.http = h
-	}
+func (c *HTTPClient) objectURL(h store.Hash) string {
+	return fmt.Sprintf("%s/repos/%s/objects/%s", c.baseURL, c.repoID, h)
 }
 
-// objectURL builds the repo-scoped URL of one object.
-func (c *Client) objectURL(h store.Hash) (string, error) {
-	return url.JoinPath(c.baseURL, c.repoID, "objects", string(h))
+func (c *HTTPClient) refURL(name string) string {
+	return fmt.Sprintf("%s/repos/%s/refs/%s", c.baseURL, c.repoID, name)
 }
 
-// refURL builds the repo-scoped URL of one ref, escaping each name segment so a
-// session id containing a separator cannot alter the path shape.
-func (c *Client) refURL(name string) (string, error) {
-	parts := append([]string{c.repoID, "refs"}, strings.Split(name, "/")...)
-	return url.JoinPath(c.baseURL, parts...)
+// HasObject implements Client.
+func (c *HTTPClient) HasObject(ctx context.Context, h store.Hash) (bool, error) {
+	if err := validateFullHash(h); err != nil {
+		return false, err
+	}
+	resp, err := c.do(ctx, http.MethodHead, c.objectURL(h), nil)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	closeBody(resp)
+	return true, nil
 }
 
-// EnsureRepo creates the repo on the server if it does not exist yet.
-// It is idempotent and reports whether the repo was newly created.
-func (c *Client) EnsureRepo(ctx context.Context) (bool, error) {
-	reposURL, err := url.JoinPath(c.baseURL, "repos")
-	if err != nil {
-		return false, err
+// PutObject implements Client.
+func (c *HTTPClient) PutObject(ctx context.Context, content []byte) (store.Hash, error) {
+	if len(content) > MaxObjectSize {
+		return "", fmt.Errorf("%w: %d bytes", ErrTooLarge, len(content))
 	}
-	body, err := json.Marshal(struct {
-		RepoID string `json:"repo_id"`
-	}{RepoID: c.repoID})
-	if err != nil {
-		return false, err
-	}
-	resp, err := c.do(ctx, http.MethodPost, reposURL, bytes.NewReader(body), "application/json")
-	if err != nil {
-		return false, err
-	}
-	defer drain(resp)
+	want := store.HashBytes(content)
 
-	switch resp.StatusCode {
-	case http.StatusCreated:
-		return true, nil
-	case http.StatusOK:
-		return false, nil
-	default:
-		return false, statusError(resp, "create repo "+c.repoID)
+	resp, err := c.do(ctx, http.MethodPost, fmt.Sprintf("%s/repos/%s/objects", c.baseURL, c.repoID), content)
+	if err != nil {
+		return "", err
 	}
+	defer closeBody(resp)
+
+	var body struct {
+		Hash string `json:"hash"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<10)).Decode(&body); err != nil {
+		return "", fmt.Errorf("decode object response: %w", err)
+	}
+	// The server is content-addressed with the same algorithm; a mismatch means
+	// we are talking to something that is not a re_gent server (or a proxy that
+	// mangled the body). Refuse to record a hash we did not verify.
+	if store.Hash(body.Hash) != want {
+		return "", fmt.Errorf("server stored object as %q but content hashes to %s", body.Hash, want)
+	}
+	return want, nil
 }
 
-// HasObject reports whether this repo on the server already holds the object.
-func (c *Client) HasObject(ctx context.Context, h store.Hash) (bool, error) {
-	u, err := c.objectURL(h)
-	if err != nil {
-		return false, err
+// GetObject implements Client.
+func (c *HTTPClient) GetObject(ctx context.Context, h store.Hash) ([]byte, error) {
+	if err := validateFullHash(h); err != nil {
+		return nil, err
 	}
-	resp, err := c.do(ctx, http.MethodHead, u, nil, "")
+	resp, err := c.do(ctx, http.MethodGet, c.objectURL(h), nil)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	defer drain(resp)
+	defer closeBody(resp)
 
-	switch resp.StatusCode {
-	case http.StatusOK:
-		return true, nil
-	case http.StatusNotFound:
-		return false, nil
-	default:
-		return false, statusError(resp, "head object "+string(h))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxObjectSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("read object %s: %w", h, err)
 	}
+	if len(data) > MaxObjectSize {
+		return nil, fmt.Errorf("%w: object %s", ErrTooLarge, h)
+	}
+	// Content addressing is the integrity check: a truncated or substituted
+	// body cannot hash to the requested value.
+	if got := store.HashBytes(data); got != h {
+		return nil, fmt.Errorf("object %s failed integrity check (got %s)", h, got)
+	}
+	return data, nil
 }
 
-// PutObject uploads one object. The upload is idempotent: re-sending an object
-// the repo already holds succeeds without rewriting it.
-func (c *Client) PutObject(ctx context.Context, h store.Hash, data []byte) error {
-	u, err := c.objectURL(h)
+// GetRef implements Client.
+func (c *HTTPClient) GetRef(ctx context.Context, name string) (store.Hash, error) {
+	if err := ValidateRefName(name); err != nil {
+		return "", err
+	}
+	resp, err := c.do(ctx, http.MethodGet, c.refURL(name), nil)
+	if err != nil {
+		return "", err
+	}
+	defer closeBody(resp)
+
+	var body struct {
+		Hash string `json:"hash"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<10)).Decode(&body); err != nil {
+		return "", fmt.Errorf("decode ref response: %w", err)
+	}
+	if err := validateFullHash(store.Hash(body.Hash)); err != nil {
+		return "", fmt.Errorf("ref %s: %w", name, err)
+	}
+	return store.Hash(body.Hash), nil
+}
+
+// UpdateRef implements Client.
+func (c *HTTPClient) UpdateRef(ctx context.Context, name string, expected, next store.Hash) error {
+	if err := ValidateRefName(name); err != nil {
+		return err
+	}
+	if err := validateFullHash(next); err != nil {
+		return fmt.Errorf("new hash: %w", err)
+	}
+	if expected != "" {
+		if err := validateFullHash(expected); err != nil {
+			return fmt.Errorf("expected hash: %w", err)
+		}
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"expected": string(expected),
+		"new":      string(next),
+	})
+	if err != nil {
+		return fmt.Errorf("encode ref update: %w", err)
+	}
+
+	resp, err := c.do(ctx, http.MethodPut, c.refURL(name), payload)
 	if err != nil {
 		return err
 	}
-	resp, err := c.do(ctx, http.MethodPut, u, bytes.NewReader(data), "application/octet-stream")
-	if err != nil {
-		return err
-	}
-	defer drain(resp)
+	closeBody(resp)
+	return nil
+}
 
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return statusError(resp, "put object "+string(h))
+// do performs one request with retries, translating HTTP status codes into
+// sentinel errors. Only network errors and 5xx are retried; 4xx are terminal.
+func (c *HTTPClient) do(ctx context.Context, method, url string, body []byte) (*http.Response, error) {
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			if err := sleepCtx(ctx, backoff(attempt)); err != nil {
+				return nil, errors.Join(err, lastErr)
+			}
+		}
+
+		var reader io.Reader
+		if body != nil {
+			reader = bytes.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, url, reader)
+		if err != nil {
+			return nil, fmt.Errorf("build request: %w", err)
+		}
+		if c.token != "" {
+			req.Header.Set("Authorization", "Bearer "+c.token)
+		}
+		if body != nil {
+			req.Header.Set("Content-Type", "application/octet-stream")
+			req.ContentLength = int64(len(body))
+		}
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			// Transport-level failure: connection refused, reset, DNS, or the
+			// context deadline expiring mid-flight. Retry unless the context is
+			// already done.
+			lastErr = fmt.Errorf("%s %s: %w", method, redactURL(url), err)
+			if ctx.Err() != nil {
+				return nil, lastErr
+			}
+			continue
+		}
+
+		statusErr := statusError(resp)
+		if statusErr == nil {
+			return resp, nil
+		}
+		retryable := isRetryableStatus(resp.StatusCode)
+		closeBody(resp)
+		lastErr = statusErr
+		if !retryable {
+			return nil, lastErr
+		}
+	}
+
+	return nil, lastErr
+}
+
+// statusError maps a response status to a sentinel error, or nil for success.
+func statusError(resp *http.Response) error {
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		return nil
+	case resp.StatusCode == http.StatusNotFound:
+		return ErrNotFound
+	case resp.StatusCode == http.StatusConflict:
+		return ErrConflict
+	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
+		return ErrUnauthorized
+	case resp.StatusCode == http.StatusUnprocessableEntity:
+		return fmt.Errorf("%w: %s", ErrIncomplete, serverMessage(resp))
+	case resp.StatusCode == http.StatusRequestEntityTooLarge:
+		return fmt.Errorf("%w: %s", ErrTooLarge, serverMessage(resp))
+	default:
+		return fmt.Errorf("server returned %s: %s", resp.Status, serverMessage(resp))
+	}
+}
+
+func isRetryableStatus(code int) bool {
+	return code >= 500 || code == http.StatusTooManyRequests
+}
+
+// serverMessage extracts the server's {"error": "..."} body, bounded in size.
+func serverMessage(resp *http.Response) string {
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	if err != nil || len(data) == 0 {
+		return "no detail"
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(data, &body) == nil && body.Error != "" {
+		return body.Error
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func backoff(attempt int) time.Duration {
+	d := 50 * time.Millisecond
+	for i := 1; i < attempt; i++ {
+		d *= 2
+	}
+	if d > 400*time.Millisecond {
+		d = 400 * time.Millisecond
+	}
+	return d
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func closeBody(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
+	// Drain a bounded amount so keep-alive connections can be reused.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+	_ = resp.Body.Close()
+}
+
+// redactURL strips any query string before an error message reaches a log,
+// since tokens are sometimes carried there by proxies.
+func redactURL(raw string) string {
+	if i := strings.IndexByte(raw, '?'); i >= 0 {
+		return raw[:i] + "?<redacted>"
+	}
+	return raw
+}
+
+func validateFullHash(h store.Hash) error {
+	if len(h) != 64 {
+		return fmt.Errorf("invalid hash %q: must be 64 hex characters", h)
+	}
+	for _, r := range h {
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') {
+			continue
+		}
+		return fmt.Errorf("invalid hash %q: must be lowercase hex", h)
 	}
 	return nil
 }
 
-// GetObject downloads one object from this repo.
-func (c *Client) GetObject(ctx context.Context, h store.Hash) ([]byte, error) {
-	u, err := c.objectURL(h)
-	if err != nil {
-		return nil, err
+// ValidateRefName mirrors the server's ref rules and, critically, rejects path
+// traversal before a ref name is interpolated into a URL.
+func ValidateRefName(name string) error {
+	if name == "" {
+		return fmt.Errorf("ref name is required")
 	}
-	resp, err := c.do(ctx, http.MethodGet, u, nil, "")
-	if err != nil {
-		return nil, err
+	if len(name) > 256 {
+		return fmt.Errorf("ref name too long (max 256 characters)")
 	}
-	defer drain(resp)
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		return io.ReadAll(io.LimitReader(resp.Body, maxObjectBytes))
-	case http.StatusNotFound:
-		return nil, fmt.Errorf("%w: %s", ErrObjectNotFound, h)
-	default:
-		return nil, statusError(resp, "get object "+string(h))
-	}
-}
-
-// GetRef reads one ref from this repo. A missing ref returns ErrRefNotFound;
-// a repo that does not exist yet returns ErrRepoNotFound.
-func (c *Client) GetRef(ctx context.Context, name string) (store.Hash, error) {
-	u, err := c.refURL(name)
-	if err != nil {
-		return "", err
-	}
-	resp, err := c.do(ctx, http.MethodGet, u, nil, "")
-	if err != nil {
-		return "", err
-	}
-	defer drain(resp)
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		var rr struct {
-			Hash string `json:"hash"`
+	for _, seg := range strings.Split(name, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return fmt.Errorf("invalid ref segment %q: empty, '.', or '..' not allowed", seg)
 		}
-		if err := json.NewDecoder(io.LimitReader(resp.Body, maxErrorBodyBytes)).Decode(&rr); err != nil {
-			return "", fmt.Errorf("decode ref %s: %w", name, err)
+		for _, r := range seg {
+			switch {
+			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			case r == ':' || r == '.' || r == '_' || r == '-':
+			default:
+				return fmt.Errorf("invalid ref segment %q: use letters, digits, ':', '.', '_', '-' only", seg)
+			}
 		}
-		return store.Hash(rr.Hash), nil
-	case http.StatusNotFound:
-		if unknownRepo(resp) {
-			return "", fmt.Errorf("%w: %s", ErrRepoNotFound, c.repoID)
-		}
-		return "", fmt.Errorf("%w: %s", ErrRefNotFound, name)
-	default:
-		return "", statusError(resp, "get ref "+name)
 	}
-}
-
-// UpdateRef performs a compare-and-swap ref update. oldHash must be the value
-// the client believes the ref currently holds ("" for a ref that should not
-// exist yet). A mismatch returns store.ErrRefConflict.
-func (c *Client) UpdateRef(ctx context.Context, name string, oldHash, newHash store.Hash) error {
-	u, err := c.refURL(name)
-	if err != nil {
-		return err
-	}
-	body, err := json.Marshal(struct {
-		Old string `json:"old"`
-		New string `json:"new"`
-	}{Old: string(oldHash), New: string(newHash)})
-	if err != nil {
-		return err
-	}
-	resp, err := c.do(ctx, http.MethodPost, u, bytes.NewReader(body), "application/json")
-	if err != nil {
-		return err
-	}
-	defer drain(resp)
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		return nil
-	case http.StatusConflict:
-		return fmt.Errorf("update ref %s: %w", name, store.ErrRefConflict)
-	default:
-		return statusError(resp, "update ref "+name)
-	}
-}
-
-// ListRefs lists the refs of this repo under dir (e.g. "sessions").
-func (c *Client) ListRefs(ctx context.Context, dir string) (map[string]store.Hash, error) {
-	u, err := url.JoinPath(c.baseURL, c.repoID, "refs")
-	if err != nil {
-		return nil, err
-	}
-	if dir != "" {
-		u += "?dir=" + url.QueryEscape(dir)
-	}
-	resp, err := c.do(ctx, http.MethodGet, u, nil, "")
-	if err != nil {
-		return nil, err
-	}
-	defer drain(resp)
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		var lr struct {
-			Refs map[string]string `json:"refs"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&lr); err != nil {
-			return nil, fmt.Errorf("decode ref list: %w", err)
-		}
-		out := make(map[string]store.Hash, len(lr.Refs))
-		for k, v := range lr.Refs {
-			out[k] = store.Hash(v)
-		}
-		return out, nil
-	case http.StatusNotFound:
-		return nil, fmt.Errorf("%w: %s", ErrRepoNotFound, c.repoID)
-	default:
-		return nil, statusError(resp, "list refs")
-	}
-}
-
-func (c *Client) do(ctx context.Context, method, rawURL string, body io.Reader, contentType string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, rawURL, body)
-	if err != nil {
-		return nil, err
-	}
-	if contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w", method, rawURL, err)
-	}
-	return resp, nil
-}
-
-// unknownRepo distinguishes "no such repo" from "no such ref" on a 404.
-func unknownRepo(resp *http.Response) bool {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
-	return strings.Contains(string(body), "unknown repo")
-}
-
-func statusError(resp *http.Response, what string) error {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
-	msg := strings.TrimSpace(string(body))
-	if msg == "" {
-		msg = resp.Status
-	}
-	return fmt.Errorf("%s: server returned %d: %s", what, resp.StatusCode, msg)
-}
-
-// drain closes a response body after consuming a bounded remainder so the
-// connection can be reused.
-func drain(resp *http.Response) {
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBodyBytes))
-	_ = resp.Body.Close()
+	return nil
 }
