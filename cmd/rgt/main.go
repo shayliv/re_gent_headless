@@ -32,6 +32,7 @@ func main() {
 	rootCmd.AddCommand(CodexHookCmd())
 	rootCmd.AddCommand(OpenCodeHookCmd())
 	rootCmd.AddCommand(PiHookCmd())
+	rootCmd.AddCommand(cli.PushCmd())
 	rootCmd.AddCommand(cli.CatCmd())
 	rootCmd.AddCommand(cli.ServeCmd())
 	rootCmd.AddCommand(cli.VersionCmd())
